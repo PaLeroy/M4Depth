@@ -15,7 +15,7 @@ case "$dataset" in
             savepath="pretrained_weights/midair"
         fi
         db_seq_len=""
-        data="data/midair/test_data"
+        data="data/midair/small_test_data"
         ;;
 
     "kitti")
