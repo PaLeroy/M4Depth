@@ -289,3 +289,5 @@ cython_debug/
 
 
 log_dir/train/
+
+to_delete.py

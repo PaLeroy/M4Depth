@@ -416,9 +416,10 @@ def tile_not_in_batch(map, nbre_copies):
     return map
 
 @tf.function
-def get_disparity_sweeping_cv(c1, c2, disp_prev_t, disp, rot, trans, camera_c, camera_f,
-                              search_range, nbre_cuts=1):
+def get_disparity_sweeping_cv(inp, search_range, nbre_cuts=1):
     """ Computes the DSCV as presented in the paper """
+    c1, c2, disp_prev_t, disp, rot, trans, camera_c,  camera_f \
+        = inp[0], inp[1], inp[2], inp[3], inp[4], inp[5], inp[6], inp[7]
 
     # Prepare inputs
     nbre_copies = 2 * search_range + 1
@@ -443,7 +444,6 @@ def get_disparity_sweeping_cv(c1, c2, disp_prev_t, disp, rot, trans, camera_c, c
     ones_ = tf.keras.layers.Lambda(lambda x: repeat_const(x, myconst))(camera_f)
     f_vec = ks.layers.Concatenate(axis=1)([camera_f, ones_])
     f_vec =  ks.layers.Reshape((1, 3, 1,),)(f_vec)
-
     rot_coords = rot_mat @ coords2d
     alpha = rot_coords[:, :, -1:, :]
     proj_coords = rot_coords * f_vec / alpha
@@ -461,19 +461,13 @@ def get_disparity_sweeping_cv(c1, c2, disp_prev_t, disp, rot, trans, camera_c, c
     # disp to flow
     sqrt_value = tf.sqrt(delta_x ** 2 + delta_y ** 2)
     divider = sqrt_value / disp  # is correct computation after simplification
-
     delta = tf.concat([delta_x / divider, delta_y / divider], axis=-1)
     flow = proj_coords + delta - start_coords
     flow = tf.reverse(flow, axis=[-1])
-
     c1 = tile_not_in_batch(c1, nbre_copies)
     combined_data = tile_not_in_batch(tf.concat([c2, disp_prev_t], axis=-1),
                                   nbre_copies)
-
-
     combined_data_w = dense_image_warp(combined_data, flow)
-    # combined_data_w = combined_data
-
     c2_w = combined_data_w[..., :-1]
     prev_disp = combined_data_w[..., -1]
     # Compute costs (operations performed in float16 for speedup)
@@ -482,13 +476,8 @@ def get_disparity_sweeping_cv(c1, c2, disp_prev_t, disp, rot, trans, camera_c, c
     sub_costs = tf.stack(split, 1)
     cv = tf.reduce_mean(sub_costs, axis=-1)
     cv_to_cast = tf.reshape(cv, [-1, (nbre_cuts) * nbre_copies, h, w])
-
-    # cv_to_cast (18, 5, 48, 48)
-    # cv_cast (5, 48, 48, 18)
-
     cv = tf.cast(tf.transpose(cv_to_cast, perm=[0, 2, 3, 1]), tf.float32)
-    tmp = prev_disp
-    prev_disp = tf.transpose(prev_disp , perm=[0, 2, 3, 1])
+    prev_disp = tf.transpose(prev_disp, perm=[0, 2, 3, 1])
     return cv, prev_disp
 
 @tf.function
@@ -572,7 +561,7 @@ def get_disparity_sweeping_cv_former(c1, c2, disp_prev_t, disp, rot, trans, came
     return a, b
 
 @tf.function
-def cost_volume(c1, c2, search_range, name="cost_volume", dilation_rate=1,
+def cost_volume(c1, search_range, name="cost_volume", dilation_rate=1,
                 nbre_cuts=1):
     """Build cost volume for associating a pixel from Image1 with its corresponding pixels in Image2.
     Args:
@@ -580,6 +569,7 @@ def cost_volume(c1, c2, search_range, name="cost_volume", dilation_rate=1,
         c2: Feature map 2
         search_range: Search range (maximum displacement)
     """
+    c2 = c1
     c1 = tf.cast(c1, tf.float16)
     c2 = tf.cast(c2, tf.float16)
     strided_search_range = search_range * dilation_rate

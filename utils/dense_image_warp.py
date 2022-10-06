@@ -123,8 +123,6 @@ def _interpolate_bilinear(grid,
       ceils = []
       index_order = [0, 1] if indexing == 'ij' else [1, 0]
       unstacked_query_points = array_ops.unstack(query_points, axis=2)
-    print("num_queries", num_queries, "unstacked_query_points",
-          len(unstacked_query_points))
 
     for dim in index_order:
       with ops.name_scope('dim-' + str(dim)):
@@ -166,29 +164,22 @@ def _interpolate_bilinear(grid,
       range = math_ops.range(batch_size) * height * width
       batch_offsets = array_ops.reshape(
           math_ops.range(batch_size) * height * width, [batch_size, 1])
-      print("flattened_grid", flattened_grid.shape)
-      print("batch_offsets", batch_offsets.shape)
+
 
     # This wraps array_ops.gather. We reshape the image data such that the
     # batch, y, and x coordinates are pulled into the first dimension.
     # Then we gather. Finally, we reshape the output back. It's possible this
     # code would be made simpler by using array_ops.gather_nd.
     def gather(y_coords, x_coords, name):
-      print("y_coords", y_coords.shape)
-      print("x_coords", x_coords.shape)
+
       with ops.name_scope('gather-' + name):
         linear_coordinates = batch_offsets + y_coords * width + x_coords
-        print("linear_coordinates", linear_coordinates.shape)
-        print("flattened_grid", flattened_grid.shape)
         gathered_values = array_ops.gather(flattened_grid, linear_coordinates)
-        print("gathered_values", gathered_values.shape)
         return array_ops.reshape(gathered_values,
                                  [batch_size, num_queries, channels])
 
-    print("floors", floors[0].shape)
     # grab the pixel values in the 4 corners around each query point
     top_left = gather(floors[0], floors[1], 'top_left')
-    print("top_left", top_left.shape)
     top_right = gather(floors[0], ceils[1], 'top_right')
     bottom_left = gather(ceils[0], floors[1], 'bottom_left')
     bottom_right = gather(ceils[0], ceils[1], 'bottom_right')
@@ -264,8 +255,6 @@ def dense_image_warp(image, flow, name='dense_image_warp'):
     else:
       query_points_flattened = array_ops.reshape(query_points_on_grid,
                                                  [-1, height * width, 2])
-      print("image", image.shape)
-      print("query_points_flattened", query_points_flattened.shape)
       # Compute values at the query points, then reshape the result back to the
       # image grid.
       interpolated = _interpolate_bilinear(image, query_points_flattened)

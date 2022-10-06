@@ -1,8 +1,26 @@
+import sys
+
 import tensorflow as tf
 import numpy as np
 from tensorflow import keras as ks, float32
 from utils.depth_operations_functionnal import get_rot_mat, \
-    get_disparity_sweeping_cv, prev_d2disp, disp2depth, cost_volume
+    get_disparity_sweeping_cv, prev_d2disp, disp2depth, cost_volume, depth2disp
+from dataloaders.midair import DataLoaderMidAir as MidAir
+from dataloaders import DataloaderParameters
+
+from importlib import reload
+import os
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+import tensorflow as tf
+from tensorflow import keras as ks
+from keras.utils import vis_utils
+from metrics import AbsRelError, SqRelError, RootMeanSquaredError, \
+    RootMeanSquaredLogError, ThresholdRelError
+
+from callbacks import CustomCheckpointCallback
+
+print(tf.__version__)
 
 
 class DomainNormalization(ks.layers.Layer):
@@ -64,10 +82,18 @@ def domain_normalization_as_a_function(f_map, regularizer_weight):
     return to_ret
 
 
+def log_tensor_companion(x):
+    print("log tensor shape", x[1], x[0].shape)
+    return x
+
+
+def log_tensor(x, name=""):
+    return ks.layers.Lambda(log_tensor_companion)((x, name))[0]
+
+
 def disp_refiner_as_a_function(regularizer_weight, name, feature_map):
     init = ks.initializers.HeNormal()
     reg = ks.regularizers.L1(l1=regularizer_weight)
-
     conv_channels = [128, 128, 96]
     prep_conv_layers = [ks.layers.Conv2D(
         nbre_filters, 3, strides=(1, 1), padding='same',
@@ -102,33 +128,50 @@ def disp_refiner_as_a_function(regularizer_weight, name, feature_map):
                 prev_outs[j] = ks.layers.LeakyReLU(0.1,
                                                    name=name + "_est_d_conv_layers_ReLu_" + str(
                                                        i))(prev_outs[j])
-
     return prev_outs  # tf.concat(prev_outs, axis=-1)
 
 
 def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
-    regularizer_weight = regularizer_weight
+    """
+    Functionnal version of M4Depth
+    """
+
+    # We start with all the inputs of the network graph from the dataset
+
+    img_input = ks.Input(shape=(384, 384, 3,), dtype=float32,
+                         name="image")  # data image
+    inputs_list = [img_input]
+
+    camera_f_input = ks.Input(shape=(2,), dtype=float32,
+                              name="camera_f_input")  # data camera property
+    inputs_list.append(camera_f_input)
+
+    camera_c_input = ks.Input(shape=(2,), dtype=float32,
+                              name="camera_c_input")  # data camera property
+    inputs_list.append(camera_c_input)
+
+    rot_input = ks.Input(shape=(4,), dtype=float32,
+                         name="rot_input")  # data camera displacement
+    inputs_list.append(rot_input)
+
+    trans_input = ks.Input(shape=(3,), dtype=float32,
+                           name="trans_input")  # data camera displacement
+    inputs_list.append(trans_input)
+
+    # new_traj_input = ks.Input(shape=(1,), dtype=bool,
+    #                           name="new_traj_input")  # data is it the first elem of a sequence
+    # inputs_list.append(new_traj_input)
+    # depth_input = ks.Input(shape=(384, 384, 3,), dtype=float32,
+    #                        name="depth_input_ground_truth")  # groundtruth
+    # inputs_list.append(depth_input)
+
+    encoder_output_list_per_level = []
+
     init = ks.initializers.HeNormal()
     reg = ks.regularizers.L1(l1=regularizer_weight)
 
     all_filter_sizes = [16, 32, 64, 96, 128, 192]
     filter_sizes = [all_filter_sizes[i] for i in range(nbre_levels)]
-    n_lvl = nbre_levels
-    is_training = False
-
-    img_input = ks.Input(shape=(384, 384, 3,), dtype=float32,
-                         name="image")  # data image
-
-    inputs_list = [img_input]
-
-    # camera_f_input,
-    # camera_c_input,
-    # rot_input,
-    # trans_input,
-    # new_traj_input,
-    # depth_input]
-
-    encoder_output_list_per_level = []
     x = img_input
 
     for idx, n_filter in enumerate(filter_sizes):
@@ -154,59 +197,35 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
             conv_layers_s2_output)
         encoder_output_list_per_level.append(x)
 
-    camera_f_input = ks.Input(shape=(2,), dtype=float32,
-                              name="camera_f_input")  # data camera property
-    inputs_list.append(camera_f_input)
+    all_output_list = []
 
-    camera_c_input = ks.Input(shape=(2,), dtype=float32,
-                              name="camera_c_input")  # data camera property
-    inputs_list.append(camera_c_input)
-
-    rot_input = ks.Input(shape=(4,), dtype=float32,
-                         name="rot_input")  # data camera displacement
-    inputs_list.append(rot_input)
-
-    trans_input = ks.Input(shape=(3,), dtype=float32,
-                           name="trans_input")  # data camera displacement
-    inputs_list.append(trans_input)
-
-    new_traj_input = ks.Input(shape=(1,), dtype=bool,
-                              name="new_traj_input")  # data is it the first elem of a sequence
-    inputs_list.append(new_traj_input)
-
-    depth_input = ks.Input(shape=(384, 384, 3,), dtype=float32,
-                           name="depth_input_ground_truth")  # groundtruth
-    inputs_list.append(depth_input)
-
+    # The decoder requires some inputs at its lower level
     b, h, w, c = encoder_output_list_per_level[-1].shape
 
     disp_L1_t_input = ks.Input(shape=(h, w, 1,), dtype=float32,
                                name=layer_string + "_disp_L-1_t")
     inputs_list.append(disp_L1_t_input)
 
-    depth_L1_t_input = ks.Input(shape=(h, w, 1,), dtype=float32,
-                                name=layer_string + "_depth_L-1_t")
-    inputs_list.append(depth_L1_t_input)
-
     other_L1_t_input = ks.Input(shape=(h, w, 4,), dtype=float32,
                                 name=layer_string + "_other_L-1_t")
     inputs_list.append(other_L1_t_input)
 
-    # We start with the bottom layer of the encoder, that's why we flip the list.
+    # We start with the bottom layer of the encoder,
+    # that's why we flip the list.
     # Reminder about layer: 1
     d_est_all_levels = []
-    for l, f_enc_L_t in enumerate(encoder_output_list_per_level[::-1]):
+    custom_out_list = []
+    for l_index, f_enc_L_t in enumerate(encoder_output_list_per_level[::-1]):
 
-        lvl_depth = n_lvl - l  # lvl_depth = L in the paper
+        lvl_depth = nbre_levels - l_index  # lvl_depth = L in the paper
         lvl_mul = lvl_depth - 3
         layer_string = "L_" + str(lvl_depth)
+        prev_layer_string = "L_" + str(lvl_depth + 1)
         b, h, w, c = f_enc_L_t.shape
 
-        # l = 0 is the smallest image so the larger we divide the camera center
+        # l_index = 0 is the smallest image of the decoder
         # divide_expo_function = lambda x: x / 2. ** float(lvl_depth)
-        # local_camera_f = ks.layers.Lambda(divide_expo_function, name=layer_string + "_local_camera_f_divide")(camera_f_input)
         local_camera_f = camera_f_input / 2. ** float(lvl_depth)
-        # local_camera_c = ks.layers.Lambda(divide_expo_function, name=layer_string+ "_local_camera_c_divide1")(camera_c_input)
         local_camera_c = camera_c_input / 2. ** float(lvl_depth)
 
         # rot and trans unchanged because everything else is rescaled
@@ -217,41 +236,50 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         # = curr_f_maps in DepthEstimatorLevel
         f_enc_L_t = f_enc_L_t
         # input from the encoder at the same level at the previous timestep
+        # t1 rps t-1
         # = prev_f_maps in DepthEstimatorLevel
         f_enc_L_t1 = ks.Input(shape=(h, w, c,), dtype=float32,
                               name=layer_string + "_f_enc_L_t-1")
         inputs_list.append(f_enc_L_t1)
 
-        # input from the disparity refiner at the same level at the previous timestep
+        # input from the disparity refiner at the same level
+        # at the previous timestep
         # = prev_t_depth in DepthEstimatorLevel
         depth_L_t1 = ks.Input(shape=(h, w, 1,), dtype=float32,
                               name=layer_string + "_d_est_L_t-1")
         inputs_list.append(depth_L_t1)
 
-        # input from the disparity refiner at the previous level at the same timestep
+        # input from the disparity refiner at the previous level
+        # at the same timestep
+        # L1 rps the previous (lower) level L-1
         # = prev_l_est in DepthEstimatorLevel
-        if l == 0:
+        if l_index == 0:
             disp_L1_t = disp_L1_t_input
-            depth_L1_t = depth_L1_t_input
             other_L1_t = other_L1_t_input
         else:
-            # resize_bilinear_function = lambda x2: tf.compat.v1.image.resize_bilinear(x2, [h, w])
-            # resize_bilinear_function = lambda x2: tf.image.resize(x2, [h, w])
-            # disp_L1_t = ks.layers.Lambda(resize_bilinear_function, name = layer_string+ "_disp_L-1_t_resized")(d_est_all_levels[-1]["disp"])
-            # depth_L1_t = ks.layers.Lambda(resize_bilinear_function, name = layer_string+ "_depth_L-1_t_resized")(d_est_all_levels[-1]["depth"])
-            # other_L1_t = ks.layers.Lambda(resize_bilinear_function, name = layer_string+ "_other_L-1_t_resized")(d_est_all_levels[-1]["other"])
+            # resize_bilinear_function =
+            # lambda x2: tf.compat.v1.image.resize_bilinear(x2, [h, w])
+            # resize_bilinear_function =
+            # lambda x2: tf.image.resize(x2, [h, w])
+            # disp_L1_t = ks.layers.Lambda(resize_bilinear_function,
+            # name = layer_string+ "_disp_L-1_t_resized")
+            # (d_est_all_levels[-1]["disp"])
+            # depth_L1_t = ks.layers.Lambda(resize_bilinear_function,
+            # name = layer_string+ "_depth_L-1_t_resized")
+            # (d_est_all_levels[-1]["depth"])
+            # other_L1_t = ks.layers.Lambda(resize_bilinear_function,
+            # name = layer_string+ "_other_L-1_t_resized")
+            # (d_est_all_levels[-1]["other"])
 
-            disp_L1_t = d_est_all_levels[-1]["disp"]
+            disp_L1_t = d_est_all_levels[-1][prev_layer_string + "_disp"]
             disp_L1_t = tf.image.resize(disp_L1_t, [h, w],
-                                        name=layer_string + "_disp_L-1_t_resized")
+                                        name=layer_string
+                                             + "_disp_L-1_t_resized")
 
-            depth_L1_t = d_est_all_levels[-1]["depth"]
-            depth_L1_t = tf.image.resize(depth_L1_t, [h, w],
-                                         name=layer_string + "_depth_L-1_t_resized")
-
-            other_L1_t = d_est_all_levels[-1]["other"]
+            other_L1_t = d_est_all_levels[-1][prev_layer_string + "_other"]
             other_L1_t = tf.image.resize(other_L1_t, [h, w],
-                                         name=layer_string + "_other_L-1_t_resized")
+                                         name=layer_string
+                                              + "_other_L-1_t_resized")
 
         nbre_cuts = 2 ** (lvl_depth // 2)
 
@@ -259,90 +287,113 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
                                       name=layer_string + "_cuts")(
             f_enc_L_t)
 
-        # by default, ks.utils.normalize = tf.linalg.normalize is L2 norm = euclidian norm
+        #  ks.utils.normalize = tf.linalg.normalize is L2 norm = euclidian norm
         # TODO: check with ks.layer.normalization
         # norm_function = lambda x: tf.math.l2_normalize(x, axis=-1)
-        # f_enc_L_t = ks.layers.Lambda(norm_function, name=layer_string+ "_normalise_cuts")(f_enc_L_t)
+        # f_enc_L_t = ks.layers.Lambda(norm_function,
+        # name=layer_string+ "_normalise_cuts")(f_enc_L_t)
         f_enc_L_t = tf.math.l2_normalize(f_enc_L_t, axis=-1,
                                          name=layer_string + "_normalise_cuts")
 
         f_enc_L_t = ks.layers.Reshape((h, w, -1,),
                                       name=layer_string + "_concat_cuts")(
             f_enc_L_t)
-
-        prev_d2disp_function = lambda x: prev_d2disp(x[0], x[1], x[2],
-                                                     x[3], x[4])
+        prev_d2disp_function = \
+            lambda inp: prev_d2disp(inp[0], inp[1], inp[2], inp[3], inp[4])
         prev_d2disp_layer = ks.layers.Lambda(prev_d2disp_function,
-                                             name=layer_string + "_prev_d2disp")
+                                             name=layer_string
+                                                  + "_prev_d2disp")
         disp_L_t1 = prev_d2disp_layer((depth_L_t1, local_rot, local_trans,
                                        local_camera_c, local_camera_f))
-        # disp_L_t1 = prev_d2disp(depth_L_t1, local_rot, local_trans, local_camera_c, local_camera_f)
+        # disp_L_t1 = prev_d2disp(depth_L_t1, local_rot,
+        #                         local_trans, local_camera_c, local_camera_f)
 
-        get_disparity_sweeping_cv_function = lambda \
-                x: get_disparity_sweeping_cv(x[0], x[1], x[2], x[3], x[4],
-                                             x[5], x[6], x[7], 4, nbre_cuts)
+        # get_disparity_sweeping_cv_function = lambda \
+        #         inp: get_disparity_sweeping_cv(inp[0], inp[1], inp[2], inp[3],
+        #                                        inp[4], inp[5], inp[6], inp[7])
+        # TODO: nbre_cut must be a tensor part of the input?
         get_disparity_sweeping_cv_layer = tf.keras.layers.Lambda(
-            get_disparity_sweeping_cv_function,
+            get_disparity_sweeping_cv,
+            arguments={"search_range": 4, "nbre_cuts": nbre_cuts},
             name=layer_string + "_get_disparity_sweeping_cv")
-        cv, disp_prev_t_reproj = get_disparity_sweeping_cv_layer((
-            f_enc_L_t,
-            f_enc_L_t1,
-            disp_L_t1,
-            disp_L1_t,
-            local_rot,
-            local_trans,
-            local_camera_c,
-            local_camera_f))
-        # cv, disp_prev_t_reproj = get_disparity_sweeping_cv(f_enc_L_t, f_enc_L_t1, disp_L_t1,  disp_L1_t, local_rot, local_trans, local_camera_c, local_camera_f, 4, nbre_cuts)
+        cv, disp_prev_t_reproj = \
+            get_disparity_sweeping_cv_layer((f_enc_L_t, f_enc_L_t1, disp_L_t1,
+                                             disp_L1_t, local_rot, local_trans,
+                                             local_camera_c, local_camera_f,))
+        # cv, disp_prev_t_reproj = \
+        #     get_disparity_sweeping_cv(f_enc_L_t, f_enc_L_t1, disp_L_t1,
+        #                               disp_L1_t, local_rot, local_trans,
+        #                               local_camera_c, local_camera_f,
+        #                               4, nbre_cuts)
 
-        autocorr_function = lambda x: cost_volume(x, x, 3,
-                                                  nbre_cuts=nbre_cuts)
-        autocorr = ks.layers.Lambda(autocorr_function,
-                                    name=layer_string + "_autocorr_function")(
-            f_enc_L_t)
-        # autocorr = cost_volume(f_enc_L_t, f_enc_L_t, 3, nbre_cuts=nbre_cuts, name=layer_string+"_autocorr_function")
+        autocorr = ks.layers.Lambda(cost_volume,
+                                    arguments={"search_range": 3,
+                                               "nbre_cuts": nbre_cuts},
+                                    name=layer_string + "_autocorr_function") \
+            (f_enc_L_t)
+        # autocorr = cost_volume(f_enc_L_t, f_enc_L_t, 3,
+        # nbre_cuts=nbre_cuts, name=layer_string+"_autocorr_function")
 
-        # disp_prev_t_reproj_log_function = lambda x : tf.math.log(x[:,:,:,4:5]*2**lvl_mul)
-        # disp_prev_t_reproj = ks.layers.Lambda(disp_prev_t_reproj_log_function, name=layer_string+"disp_prev_t_reproj_log_function")(disp_prev_t_reproj)
+        # disp_prev_t_reproj_log_function
+        # = lambda x : tf.math.log(x[:,:,:,4:5]*2**lvl_mul)
+        # disp_prev_t_reproj = ks.layers.Lambda
+        # (disp_prev_t_reproj_log_function,
+        # name=layer_string+"disp_prev_t_reproj_log_function")
+        # (disp_prev_t_reproj)
+
         disp_prev_t_reproj = tf.math.log(
             disp_prev_t_reproj[:, :, :, 4:5] * 2 ** lvl_mul,
             name=layer_string + "disp_prev_t_reproj_log_function")
 
         # disp_L1_t_log_function = lambda x: tf.math.log(x*2**lvl_mul)
-        # disp_L1_t = ks.layers.Lambda(disp_L1_t_log_function, name=layer_string+"_disp_L-1_t_log_function")(disp_L1_t)
+        # disp_L1_t = ks.layers.Lambda(disp_L1_t_log_function,
+        # name=layer_string+"_disp_L-1_t_log_function")(disp_L1_t)
         disp_L1_t = tf.math.log(disp_L1_t * 2 ** lvl_mul,
                                 name=layer_string + "_disp_L-1_t_log_function")
-        f_input = ks.layers.Concatenate(axis=3,
-                                        name=layer_string + "_Concatenate_cv_disp_L-1_t")(
-            [cv, disp_L1_t])
-        f_input = ks.layers.Concatenate(axis=3,
-                                        name=layer_string + "_Concatenate_other_L-1_t")(
-            [f_input, other_L1_t])
-        f_input = ks.layers.Concatenate(axis=3,
-                                        name=layer_string + "_Concatenate_autocorr")(
-            [f_input, autocorr])
-        f_input = ks.layers.Concatenate(axis=3,
-                                        name=layer_string + "_Concatenate_disp_prev_t_reproj")(
-            [f_input, disp_prev_t_reproj])
+        f_input = \
+            ks.layers.Concatenate(
+                axis=-1,
+                name=layer_string + "_Concatenate_cv_disp_L-1_t")(
+                [cv, disp_L1_t])
+        f_input = \
+            ks.layers.Concatenate(
+                axis=-1,
+                name=layer_string + "_Concatenate_other_L-1_t")(
+                [f_input, other_L1_t])
+        f_input = \
+            ks.layers.Concatenate(
+                axis=-1,
+                name=layer_string + "_Concatenate_autocorr")(
+                [f_input, autocorr])
+        f_input = \
+            ks.layers.Concatenate(
+                axis=-1,
+                name=layer_string + "_Concatenate_disp_prev_t_reproj")(
+                [f_input, disp_prev_t_reproj])
 
         prev_out = disp_refiner_as_a_function(
             regularizer_weight=regularizer_weight,
             name=layer_string + "_disp_refiner", feature_map=f_input)
 
         # slicing_disp_function = lambda x: x[0][:, :, :, :1]
-        # disp = ks.layers.Lambda(slicing_disp_function, name=layer_string + "_slicing_disp_function")(prev_out)
+        # disp = ks.layers.Lambda(slicing_disp_function,
+        # name=layer_string + "_slicing_disp_function")(prev_out)
         disp = prev_out[0][:, :, :, :1]
 
         # slicing_other_function = lambda x: x[0][:, :, :, 1:]
-        # other = ks.layers.Lambda(slicing_other_function, name=layer_string + "_slicing_other_function")(prev_out)
+        # other = ks.layers.Lambda(slicing_other_function,
+        # name=layer_string + "_slicing_other_function")(prev_out)
         other = prev_out[0][:, :, :, 1:]
-        # exp_clip_function = lambda x: tf.exp(tf.clip_by_value(x, -7., 7.))/2**lvl_mul
-        # disp_curr_l = ks.layers.Lambda(exp_clip_function, name=layer_string + "_disp_curr_l_exp_clip_function")(disp)
-        disp_curr_l = tf.exp(
-            tf.clip_by_value(disp, -7., 7.)) / 2 ** lvl_mul
+        # exp_clip_function = lambda x:
+        # tf.exp(tf.clip_by_value(x, -7., 7.))/2**lvl_mul
+        # disp_curr_l = ks.layers.Lambda(exp_clip_function,
+        # name=layer_string + "_disp_curr_l_exp_clip_function")(disp)
+        disp_curr_l = \
+            tf.exp(tf.clip_by_value(disp, -7., 7.)) / 2 ** lvl_mul
 
-        disp2depth_function = lambda x: disp2depth(x[0], x[1], x[2], x[3],
-                                                   x[4])
+        disp2depth_function = \
+            lambda x: disp2depth(x[0], x[1], x[2], x[3], x[4])
+
         disp2depth_function_layer = ks.layers.Lambda(disp2depth_function,
                                                      name=layer_string + "_depth_curr_l_disp2depth_function")
         depth_curr_l = disp2depth_function_layer((disp_curr_l, local_rot,
@@ -350,33 +401,368 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
                                                   local_camera_c,
                                                   local_camera_f))
 
-        # identity_function = lambda x:  tf.identity(x)
+        # These layers have no effect on value directly
+        # but allow to isolate and rename variables
         curr_l_est = {
-            # "other": ks.layers.Lambda(identity_function, name=layer_string+ "_other_identity")(other),
-            # "depth":  ks.layers.Lambda(identity_function, name=layer_string + "_depth_identity")(depth_curr_l),
-            # "disp":  ks.layers.Lambda(identity_function, name=layer_string + "_disp_identity")(disp_curr_l),
-            "other": tf.identity(other,
-                                 name=layer_string + "_other_identity"),
-            "depth": tf.identity(depth_curr_l,
-                                 name=layer_string + "_depth_identity"),
-            "disp": tf.identity(disp_curr_l,
-                                name=layer_string + "_disp_identity")
+            layer_string + "_other": ks.layers.Layer(
+                name=layer_string + "_other_identity")
+            (tf.identity(other)),
+            layer_string + "_depth": ks.layers.Layer(
+                name=layer_string + "_depth_identity")
+            (tf.identity(depth_curr_l)),
+            layer_string + "_disp": ks.layers.Layer(
+                name=layer_string + "_disp_identity")
+            (tf.identity(disp_curr_l))
         }
         d_est_all_levels.append(curr_l_est)
 
     all_output_list = []
-    for i in d_est_all_levels:
+    for cpt, i in enumerate(d_est_all_levels):
         for k, v in i.items():
             all_output_list.append(v)
 
-    return ks.Model(inputs=inputs_list, outputs=all_output_list)
+    return ks.Model(inputs=inputs_list, outputs=encoder_output_list_per_level+all_output_list)
 
 
-n_lvl = 6
-model = M4Depth_functionnal_model(nbre_levels=n_lvl)
-model.summary()
-name = "m4depth_model_L_" + str(n_lvl) + ".h5"
-model.save(
-    name,
-    save_format="h5",
-)
+class M4Depth(ks.models.Model):
+    """Tensorflow model of M4Depth"""
+
+    def __init__(self, nbre_levels=6, regularizer_weight=0.):
+        super(M4Depth, self).__init__()
+        regularizer_weight = 0.
+
+        self.full_model = M4Depth_functionnal_model(nbre_levels,
+                                                    regularizer_weight=regularizer_weight)
+        self.step_counter = tf.Variable(
+            initial_value=tf.zeros_initializer()(shape=[], dtype='int64'),
+            trainable=False)
+        self.summaries = []
+
+    @tf.function
+    def call(self, data):
+        # Traj samples items are [batch_size, seq_len, ....]
+        traj_samples = data[0]
+        camera = data[1]
+        depths = []
+        camera_c_input = camera["c"]
+        camera_f_input = camera["f"]
+        L_3_disp_L1_t = L_3_disp_L1_t_init
+        L_3_other_L1_t = L_3_other_L1_t_init
+        L_3_f_enc_L_t1 = L_3_f_enc_L_t1_init
+        L_3_d_est_L_t1 = L_3_d_est_L_t1_init
+        L_2_f_enc_L_t1 = L_2_f_enc_L_t1_init
+        L_2_d_est_L_t1 = L_2_d_est_L_t1_init
+        L_1_f_enc_L_t1 = L_1_f_enc_L_t1_init
+        L_1_d_est_L_t1 = L_1_d_est_L_t1_init
+
+        for idx_sample, sample in enumerate(traj_samples):
+            # for each elem of the sequence
+            image = sample["RGB_im"]
+            rot_input = sample["rot"]
+            trans_input = sample["trans"]
+
+            inputs = [image, camera_f_input, camera_c_input, rot_input,
+                      trans_input,
+                      L_3_disp_L1_t, L_3_other_L1_t,
+                      L_3_f_enc_L_t1, L_3_d_est_L_t1,
+                      L_2_f_enc_L_t1, L_2_d_est_L_t1,
+                      L_1_f_enc_L_t1, L_1_d_est_L_t1]
+            outputs = self.full_model(inputs)
+
+            L_3_disp_L1_t = L_3_disp_L1_t_init
+            L_3_other_L1_t = L_3_other_L1_t_init
+
+            L_1_f_enc_L_t1 = outputs[0]
+            L_2_f_enc_L_t1 = outputs[1]
+            L_3_f_enc_L_t1 = outputs[2]
+
+            L_3_d_est_L_t1 = outputs[4]
+            L_2_d_est_L_t1 = outputs[7]
+            L_1_d_est_L_t1 = outputs[10]
+
+            depths.append(({"depth": L_1_d_est_L_t1}, {"depth": L_2_d_est_L_t1}, {"depth": L_3_d_est_L_t1}))
+        return depths
+    @tf.function
+    def train_step(self, data):
+        with tf.name_scope("train_scope"):
+            with tf.GradientTape() as tape:
+                # iterate over dataset
+                seq_len = data["depth"].get_shape().as_list()[1]
+                traj_samples = [{} for i in range(seq_len)]
+                attribute_list = ["depth", "RGB_im", "new_traj", "rot",
+                                  "trans"]
+                for key in attribute_list:
+                    value_list = tf.unstack(data[key], axis=1)
+                    for i, item in enumerate(value_list):
+                        shape = item.get_shape()
+                        traj_samples[i][key] = item
+                gts = []
+                for sample in traj_samples:
+                    gts.append({"depth": sample["depth"],
+                                "disp": depth2disp(sample["depth"],
+                                                   sample["rot"],
+                                                   sample["trans"],
+                                                   data["camera"]["c"],
+                                                   data["camera"]["f"])})
+                preds = model((traj_samples, data["camera"]))
+
+                loss = model.m4depth_loss(gts, preds)
+
+            # Compute gradients
+            trainable_vars = self.trainable_variables
+            gradients = tape.gradient(loss, trainable_vars)
+
+            # Update weights
+            self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+            # Update metrics (includes the metric that tracks the loss)
+        #
+        # with tf.name_scope("summaries"):
+        #     max_d = 200.
+        #     gt_d_clipped = tf.clip_by_value(traj_samples[-1]['depth'], 1.,
+        #                                     max_d)
+        #     tf.summary.image("RGB_im", traj_samples[-1]['RGB_im'],
+        #                      step=self.step_counter)
+        #     im_reproj, _ = reproject(traj_samples[-2]['RGB_im'],
+        #                              traj_samples[-1]['depth'],
+        #                              traj_samples[-1]['rot'],
+        #                              traj_samples[-1]['trans'], data["camera"])
+        #     tf.summary.image("camera_prev_t_reproj", im_reproj,
+        #                      step=self.step_counter)
+        #
+        #     tf.summary.image("depth_gt",
+        #                      tf.math.log(gt_d_clipped) / tf.math.log(max_d),
+        #                      step=self.step_counter)
+        #     for i, est in enumerate(preds[-1]):
+        #         d_est_clipped = tf.clip_by_value(est["depth"], 1., max_d)
+        #         self.summaries.append(
+        #             [tf.summary.image, "depth_lvl_%i" % i,
+        #              tf.math.log(d_est_clipped) / tf.math.log(max_d)])
+        #         tf.summary.image("depth_lvl_%i" % i,
+        #                          tf.math.log(d_est_clipped) / tf.math.log(
+        #                              max_d),
+        #                          step=self.step_counter)
+
+        # with tf.name_scope("metrics"):
+            # gt = gts[-1]["depth"]
+            # est = tf.image.resize(preds[-1][0]["depth"], gt.get_shape()[1:3],
+            #                       method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+            #
+            # max_d = 80.
+            # gt = tf.clip_by_value(gt, 0.00, max_d)
+            # est = tf.clip_by_value(est, 0.001, max_d)
+            # self.compiled_metrics.update_state(gt, est)
+            # out_dict = {m.name: m.result() for m in self.metrics}
+            # out_dict["loss"] = loss
+
+        # Return a dict mapping metric names to current value.
+        # Note that it will include the loss (tracked in self.metrics).
+        return {"loss":loss}
+
+    @tf.function
+    def test_step(self, data):
+        # expects one sequence element at a time (batch dim required and is free to set)"
+        data_format = len(data["depth"].get_shape().as_list())
+
+        # If sequence was received as input, compute performance metrics only on its last frame (required for KITTI benchmark))
+        if data_format == 5:
+            seq_len = data["depth"].get_shape().as_list()[1]
+            traj_samples = [{} for i in range(seq_len)]
+            attribute_list = ["depth", "RGB_im", "new_traj", "rot", "trans"]
+            for key in attribute_list:
+                value_list = tf.unstack(data[key], axis=1)
+                for i, item in enumerate(value_list):
+                    shape = item.get_shape()
+                    traj_samples[i][key] = item
+
+            gts = []
+            for sample in traj_samples:
+                gts.append({"depth": sample["depth"],
+                            "disp": depth2disp(sample["depth"], sample["rot"],
+                                               sample["trans"],
+                                               data["camera"])})
+            preds = self([traj_samples, data["camera"]], training=False)
+            gt = data["depth"][:, -1, :, :, :]
+            est = preds["depth"]
+            new_traj = False
+        else:
+            preds = self([[data], data["camera"]], training=False)
+            gt = data["depth"]
+            est = preds["depth"]
+            new_traj = data["new_traj"]
+
+        with tf.name_scope("metrics"):
+            # Compute performance scores
+
+            max_d = 80.
+            gt = tf.clip_by_value(gt, 0.0, max_d)
+            est = tf.clip_by_value(est, 0.001, max_d)
+
+            if not new_traj:
+                self.compiled_metrics.update_state(gt, est)
+
+        # Return a dict mapping metric names to current value.
+        out_dict = {m.name: m.result() for m in self.metrics}
+        return out_dict
+
+    @tf.function
+    def predict_step(self, data):
+        # expects one sequence element at a time (batch dim is required a
+        # nd is free to be set)"
+        preds = self.full_model([[data], data["camera"]], training=False)
+
+        est = preds
+
+        return_data = {
+            "image": data["RGB_im"],
+            "depth": est["depth"],
+            "new_traj": data["new_traj"]
+        }
+        return return_data
+
+    @tf.function
+    def m4depth_loss(self, gts, preds):
+        with tf.name_scope("loss_function"):
+
+            # Clip and convert depth
+            def preprocess(input):
+                return tf.math.log(tf.clip_by_value(input, 0.01, 200.))
+
+            l1_loss = 0.
+            for gt, pred_pyr in zip(gts[1:],
+                                    preds[1:]):  # Iterate over sequence
+                nbre_points = 0.
+
+                gt_preprocessed = preprocess(gt["depth"])
+
+                def masked_reduce_mean(array, mask, axis=None):
+                    return tf.reduce_sum(array * mask, axis=axis) / (
+                            tf.reduce_sum(mask, axis=axis) + 1e-12)
+
+                for i, pred in enumerate(
+                        pred_pyr):  # Iterate over the outputs produced by the different levels
+                    pred_depth = preprocess(pred["depth"])
+
+                    # Compute loss term
+                    b, h, w = pred_depth.get_shape().as_list()[:3]
+                    nbre_points += h * w
+
+                    gt_resized = tf.image.resize(gt_preprocessed, [h, w])
+                    l1_loss_term = (0.64 / (
+                            2. ** (i - 1))) * tf.reduce_mean(
+                        tf.abs(gt_resized - pred_depth))
+
+                    l1_loss += l1_loss_term / (float(len(gts) - 1))
+            return l1_loss
+
+    def save_h5(self, name):
+        self.full_model.save(
+            name,
+            save_format="h5",
+        )
+
+
+param = DataloaderParameters({
+    '_comment': '/Users/pascalleroy/Documents/m4depth/M4Depth/relative paths should be written relative to this file',
+    'midair': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/MidAir',
+    'kitti-raw': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/Kitti',
+    'tartanair': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/TartanAir'},
+    'data/midair/small_train_data',
+    8,  # db_seq_len
+    4,  # seq_len
+    True)
+chosen_dataloader = MidAir()
+batch_size = 2
+chosen_dataloader.get_dataset("train", param, batch_size=batch_size)
+data = chosen_dataloader.dataset
+
+# model.summary()
+# name = "m4depth_model_L_" + str(n_lvl) + ".h5"
+# model.save_h5(name)
+# from keras.utils import vis_utils
+# name = "m4depth_model_L_" + str(n_lvl) + ".png"
+# vis_utils.plot_model(model, to_file=name, show_shapes=False, expand_nested=False)
+
+
+n_lvl = 3
+# model = M4Depth_functionnal_model(nbre_levels=n_lvl)
+# for idx, i in enumerate(model.outputs):
+#     print("output ", idx, i)
+# name = "m4depth_model_L_" + str(n_lvl) + ".h5"
+# model.save( name,  save_format="h5",   )
+# vis_utils.plot_model(model, to_file="custom.png", show_shapes=True,
+#                      expand_nested=False)
+#
+
+# image = tf.random.uniform((batch_size, 384, 384, 3))
+# camera_f_input = tf.random.uniform ((batch_size, 2))
+# camera_c_input = tf.random.uniform ((batch_size, 2))
+# rot_input = tf.random.uniform ((batch_size, 4))
+# trans_input = tf.random.uniform ((batch_size, 3))
+
+# size is dependent of nbre_level
+L_2_disp_L1_t = tf.ones((batch_size, 96, 96,
+                         1))  # for all inputs TODO: maybe possible to hardcode it in the network?
+L_2_other_L1_t = tf.zeros((batch_size, 96, 96,
+                           4))  # for all inputs TODO: maybe possible to hardcode it in the network?
+
+L_3_disp_L1_t_init = tf.ones((batch_size, 48, 48,
+                         1))  # for all inputs TODO: maybe possible to hardcode it in the network?
+L_3_other_L1_t_init = tf.zeros((batch_size, 48, 48,
+                           4))  # for all inputs TODO: maybe possible to hardcode it in the network?
+
+# Here we need a loop w.r.t nbre_level
+L_3_f_enc_L_t1_init  = tf.zeros(
+    (batch_size, 48, 48, 64))  # Only for the first element of a sequence
+L_3_d_est_L_t1_init  = tf.ones(
+    (batch_size, 48, 48, 1))  # Only for the first element of a sequence
+L_2_f_enc_L_t1_init  = tf.zeros(
+    (batch_size, 96, 96, 32))  # Only for the first element of a sequence
+L_2_d_est_L_t1_init  = tf.ones(
+    (batch_size, 96, 96, 1))  # Only for the first element of a sequence
+L_1_f_enc_L_t1_init  = tf.zeros(
+    (batch_size, 192, 192, 16))  # Only for the first element of a sequence
+L_1_d_est_L_t1_init  = tf.ones(
+    (batch_size, 192, 192, 1))  # Only for the first element of a sequence
+
+
+print("-------------")
+print()
+print()
+model = M4Depth(nbre_levels=n_lvl)
+
+# tensorboard_cbk = ks.callbacks.TensorBoard(
+#     log_dir="log_dir", histogram_freq=1200, write_graph=True,
+#     write_images=False, update_freq=1200,
+#     profile_batch=0, embeddings_freq=0, embeddings_metadata=None)
+# weights_dir = os.path.join("pretrained_weights/midair/", "train")
+# model_checkpoint_cbk = CustomCheckpointCallback(weights_dir, resume_training=True)
+
+opt = tf.keras.optimizers.Adam(learning_rate=0.0001)
+model.compile(optimizer=opt, metrics=[RootMeanSquaredLogError()])
+nbre_epochs = 1
+model.fit(data, epochs=nbre_epochs)
+
+# for idx_data, data in enumerate(data):
+#     print("batch", idx_data)
+#     # iterate over dataset
+#     seq_len = data["depth"].get_shape().as_list()[1]
+#     traj_samples = [{} for i in range(seq_len)]
+#     attribute_list = ["depth", "RGB_im", "new_traj", "rot", "trans"]
+#     for key in attribute_list:
+#         value_list = tf.unstack(data[key], axis=1)
+#         for i, item in enumerate(value_list):
+#             shape = item.get_shape()
+#             traj_samples[i][key] = item
+#     gts = []
+#     for sample in traj_samples:
+#         gts.append({"depth": sample["depth"],
+#                     "disp": depth2disp(sample["depth"],
+#                                        sample["rot"],
+#                                        sample["trans"],
+#                                        data["camera"]["c"],
+#                                        data["camera"]["f"])})
+#     preds = model((traj_samples, data["camera"]))
+#
+#     loss = model.m4depth_loss(gts, preds)
+#     print("loss: ", loss)
+#     tf.print("loss: ", loss)

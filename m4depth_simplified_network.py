@@ -16,7 +16,7 @@ import time
 
 import tensorflow as tf
 from tensorflow import keras as ks
-from utils.depth_operations_functionnal import *
+from utils.depth_operations import *
 from collections import namedtuple
 
 
@@ -111,7 +111,7 @@ class DispRefiner(ks.layers.Layer):
 
     @tf.function
     def call(self, feature_map):
-        tf.print("feature_map", feature_map.shape)
+        # tf.print("feature_map", feature_map.shape)
         prev_out = tf.identity(feature_map)
 
         for i, conv in enumerate(self.prep_conv_layers):
@@ -153,7 +153,7 @@ class DepthEstimatorLevel(ks.layers.Layer):
         f_maps_init = tf.zeros_initializer()
         d_maps_init = tf.ones_initializer()
         if (not self.is_training):
-            tf.print("Temporal memory instanciation")
+            # tf.print("Temporal memory instanciation")
             self.prev_f_maps = self.add_weight(name="prev_f_maps", shape=self.shape, dtype='float32',
                                                initializer=f_maps_init, trainable=False, use_resource=False)
             self.depth_prev_t = self.add_weight(name="depth_prev_t", shape=self.shape[:3] + [1], dtype='float32',
@@ -163,20 +163,20 @@ class DepthEstimatorLevel(ks.layers.Layer):
 
     @tf.function
     def call(self, curr_f_maps, prev_l_est, rot, trans, camera, new_traj, prev_f_maps=None, prev_t_depth=None):
-        tf.print("--**--prev_f_maps {}".format((len(prev_f_maps), type(prev_f_maps)) if prev_f_maps is not None else None))
+        # tf.print("--**--prev_f_maps {}".format((len(prev_f_maps), type(prev_f_maps)) if prev_f_maps is not None else None))
         with tf.name_scope("DepthEstimator_lvl"):
             b, h, w, c = self.shape
 
             nbre_cuts = 2**(self.lvl_depth//2)
-            # tf.print(self.lvl_depth,"nbre_cuts", nbre_cuts)
+#             # tf.print(self.lvl_depth,"nbre_cuts", nbre_cuts)
             # Preparation of the feature maps for to cost volumes
-            # tf.print(self.lvl_depth,"curr_f_maps", curr_f_maps.shape)
+#             # tf.print(self.lvl_depth,"curr_f_maps", curr_f_maps.shape)
             curr_f_maps=tf.reshape(curr_f_maps, [b,h,w,nbre_cuts,-1])
-            # tf.print(self.lvl_depth,"curr_f_maps reshape", curr_f_maps.shape)
+#             # tf.print(self.lvl_depth,"curr_f_maps reshape", curr_f_maps.shape)
             curr_f_maps = tf.linalg.normalize(curr_f_maps, axis=-1)[0]
-            # tf.print(self.lvl_depth,"curr_f_maps normalize", curr_f_maps.shape)
+#             # tf.print(self.lvl_depth,"curr_f_maps normalize", curr_f_maps.shape)
             curr_f_maps = tf.concat(tf.unstack(curr_f_maps, axis=3), axis=3)
-            # tf.print(self.lvl_depth,"curr_f_maps after concat unstack", curr_f_maps.shape)
+#             # tf.print(self.lvl_depth,"curr_f_maps after concat unstack", curr_f_maps.shape)
 
             if prev_f_maps is not None:
                 # Only when training a whole sequence!
@@ -186,7 +186,7 @@ class DepthEstimatorLevel(ks.layers.Layer):
 
             # Manage level temporal memory
             if (not self.is_training) and prev_f_maps is None and prev_t_depth is None:
-                tf.print("ok", self.depth_prev_t.shape, self.prev_f_maps.shape)
+                # tf.print("ok", self.depth_prev_t.shape, self.prev_f_maps.shape)
                 prev_t_depth = self.depth_prev_t
                 prev_f_maps = self.prev_f_maps
 
@@ -200,14 +200,14 @@ class DepthEstimatorLevel(ks.layers.Layer):
                 disp_prev_l = tf.compat.v1.image.resize_bilinear(prev_l_est["disp"], [h, w]) * 2.
                 depth_prev_l = tf.compat.v1.image.resize_bilinear(prev_l_est["depth"], [h, w])
 
-            tf.print("--**-- post init prev_f_maps {}".format(
-                prev_f_maps if prev_f_maps is not None else None))
+            # tf.print("--**-- post init prev_f_maps {}".format(
+            #     prev_f_maps if prev_f_maps is not None else None))
 
             # Reinitialize temporal memory if sample is part of a new sequence
             # Note : sequences are supposed to be synchronized over the whole batch
-            tf.print("prev_t_depth", tf.reduce_sum(prev_t_depth))
+            # tf.print("prev_t_depth", tf.reduce_sum(prev_t_depth))
             if prev_t_depth is None or new_traj[0]:
-                tf.print("new sequence")
+                # tf.print("new sequence")
                 prev_t_depth = tf.ones(self.shape[:3] + [1], dtype='float32') * 1000.
                 if not self.is_training:
                     self.prev_f_maps.assign(curr_f_maps)
@@ -215,15 +215,15 @@ class DepthEstimatorLevel(ks.layers.Layer):
                 curr_l_est = {"depth": depth_prev_l, "disp": disp_prev_l, "other": other_prev_l}
                 return curr_l_est
             else:
-                tf.print("continuing sequence")
-                tf.print(self.lvl_depth, "prev_f_maps", self.prev_f_maps.shape)
-                tf.print(self.lvl_depth, "depth_prev_t", self.depth_prev_t.shape)
-                tf.print(self.lvl_depth, "curr_f_maps", curr_f_maps.shape)
+                # tf.print("continuing sequence")
+                # tf.print(self.lvl_depth, "prev_f_maps", self.prev_f_maps.shape)
+                # tf.print(self.lvl_depth, "depth_prev_t", self.depth_prev_t.shape)
+                # tf.print(self.lvl_depth, "curr_f_maps", curr_f_maps.shape)
                 with tf.name_scope("preprocessor"):
 
                     disp_prev_t = prev_d2disp(prev_t_depth, rot, trans, camera)
 
-                    cv, disp_prev_t_reproj = get_disparity_sweeping_cv_former(curr_f_maps, prev_f_maps, disp_prev_t,
+                    cv, disp_prev_t_reproj = get_disparity_sweeping_cv(curr_f_maps, prev_f_maps, disp_prev_t,
                                                                        disp_prev_l, rot, trans, camera, 4, nbre_cuts=nbre_cuts)
 
                     with tf.name_scope("input_prep"):
@@ -243,13 +243,12 @@ class DepthEstimatorLevel(ks.layers.Layer):
 
                         f_input = tf.concat(input_features, axis=3)
 
-                tf.print(self.lvl_depth, "f_input", f_input.shape)
+                # tf.print(self.lvl_depth, "f_input", f_input.shape)
                 with tf.name_scope("depth_estimator"):
                     prev_out = self.disp_refiner(f_input)
 
                     disp = prev_out[0][:, :, :, :1]
                     other = prev_out[0][:, :, :, 1:]
-
                     disp_curr_l = tf.exp(tf.clip_by_value(disp, -7., 7.))/2**self.lvl_mul
                     depth_prev_t = disp2depth(disp_curr_l, rot, trans, camera)
 
@@ -263,7 +262,7 @@ class DepthEstimatorLevel(ks.layers.Layer):
                         self.prev_f_maps.assign(curr_f_maps)
                         self.depth_prev_t.assign(depth_prev_t)
 
-            return curr_l_est
+                return curr_l_est
 
 
 class DepthEstimatorPyramid(ks.layers.Layer):
@@ -282,15 +281,15 @@ class DepthEstimatorPyramid(ks.layers.Layer):
     @tf.function
     def call(self, f_maps_pyrs, traj_samples, camera, training=False):
         d_est_seq = []
-        tf.print("type(traj_samples)", type(traj_samples), len(traj_samples))
+        # tf.print("type(traj_samples)", type(traj_samples), len(traj_samples))
+        print(len(traj_samples))
         for seq_i, (f_pyr_curr, sample) in enumerate(zip(f_maps_pyrs, traj_samples)):
             # For each image of the sequence
             # (only 1 image in predict mode,
             # maybe more at training/testing to accelerate).
             # Sometimes, a sequence is given to increase training time (batch forward for the encoder for example).
-
             with tf.name_scope("DepthEstimator_seq"):
-                tf.print("Seq sample %i" % seq_i)
+                # tf.print("Seq sample %i" % seq_i)
                 rot = sample['rot']
                 trans = sample['trans']
 
@@ -314,7 +313,7 @@ class DepthEstimatorPyramid(ks.layers.Layer):
                     local_camera = camera.copy()
                     local_camera["f"] /= 2. ** cnter
                     local_camera["c"] /= 2. ** cnter
-                    tf.print("l, fmaps, {} - {} ".format(l, f_maps_prev.shape if f_maps_prev is not None else None))
+                    # tf.print("l, fmaps, {} - {} ".format(l, f_maps_prev.shape if f_maps_prev is not None else None))
 
                     if l != 0:
                         d_est = d_est_curr[-1].copy()
@@ -324,15 +323,15 @@ class DepthEstimatorPyramid(ks.layers.Layer):
                     local_rot = rot
                     local_trans = trans
                     new_traj = sample["new_traj"]
-                    # tf.print("--------------- l", l)
-                    # tf.print("--------------- f_maps_curr", f_maps_curr.shape)
-                    # tf.print("--------------- d_est)", d_est if d_est is not None else None)
-                    # tf.print("--------------- local_rot", local_rot)
-                    # tf.print("--------------- local_trans", local_trans)
-                    # tf.print("--------------- local_camera", local_camera)
-                    # tf.print("--------------- new_traj", new_traj)
-                    # tf.print("--------------- f_maps_prev", f_maps_prev)
-                    # tf.print("--------------- d_est_prev", d_est_prev)
+#                     # tf.print("--------------- l", l)
+#                     # tf.print("--------------- f_maps_curr", f_maps_curr.shape)
+#                     # tf.print("--------------- d_est)", d_est if d_est is not None else None)
+#                     # tf.print("--------------- local_rot", local_rot)
+#                     # tf.print("--------------- local_trans", local_trans)
+#                     # tf.print("--------------- local_camera", local_camera)
+#                     # tf.print("--------------- new_traj", new_traj)
+#                     # tf.print("--------------- f_maps_prev", f_maps_prev)
+#                     # tf.print("--------------- d_est_prev", d_est_prev)
 
                     if d_est_curr is None:
                         d_est_curr = [level(f_maps_curr, None, local_rot, local_trans, local_camera, new_traj,
@@ -370,7 +369,7 @@ class M4Depth(ks.models.Model):
     def call(self, data, training=False):
         traj_samples = data[0]
         camera = data[1]
-        tf.print("type(traj_samples)", type(traj_samples), len(traj_samples))
+        # tf.print("type(traj_samples)", type(traj_samples), len(traj_samples))
         with tf.name_scope("M4Depth"):
             self.step_counter.assign_add(1)
 
@@ -379,7 +378,7 @@ class M4Depth(ks.models.Model):
                 f_maps_pyrs.append(self.encoder(sample['RGB_im']))
 
             d_maps_pyrs = self.d_estimator(f_maps_pyrs, traj_samples, camera, training)
-
+            tf.print("dmap len", len(d_maps_pyrs))
             if training:
                 return d_maps_pyrs
             else:
@@ -391,7 +390,15 @@ class M4Depth(ks.models.Model):
     def train_step(self, data):
         with tf.name_scope("train_scope"):
             with tf.GradientTape() as tape:
-
+                for k, v in data.items():
+                    if k == "camera":
+                        tf.print("camera c ", data["camera"]["c"].shape)
+                        tf.print("camera f ", data["camera"]["f"].shape)
+                        print("camera c ", data["camera"]["c"].shape)
+                        print("camera f ", data["camera"]["f"].shape)
+                    else:
+                        tf.print(k, v.shape)
+                        print(k, v.shape)
                 # Rearrange samples produced by the dataloader
                 seq_len = data["depth"].get_shape().as_list()[1]
                 traj_samples = [{} for i in range(seq_len)]
@@ -402,7 +409,9 @@ class M4Depth(ks.models.Model):
                         shape = item.get_shape()
                         traj_samples[i][key] = item
 
-                gts = []
+
+
+                gts = []# ground truth
                 for sample in traj_samples:
                     gts.append({"depth":sample["depth"], "disp": depth2disp(sample["depth"], sample["rot"], sample["trans"], data["camera"])})
                 preds = self([traj_samples, data["camera"]], training=True)
@@ -494,9 +503,10 @@ class M4Depth(ks.models.Model):
 
     @tf.function
     def predict_step(self, data):
+        print("predict step")
         # expects one sequence element at a time (batch dim is required and is free to be set)"
         preds = self([[data], data["camera"]], training=False)
-        tf.print("new_traj", data["new_traj"])
+        # tf.print("new_traj", data["new_traj"])
         with tf.name_scope("metrics"):
             est = preds
 
@@ -523,10 +533,18 @@ class M4Depth(ks.models.Model):
 
                 def masked_reduce_mean(array, mask, axis=None):
                     return tf.reduce_sum(array * mask, axis=axis) / (tf.reduce_sum(mask, axis=axis) + 1e-12)
+                for i, pred in enumerate(pred_pyr):  # Iterate over the outputs produced by the different levels
+                    tf.print("i", i)
+                    print("i", i)
 
+                    pred_depth = preprocess(pred["depth"])
+                    tf.print(pred_depth.shape)
+                    print(pred_depth.shape)
+
+                exit()
                 for i, pred in enumerate(pred_pyr):  # Iterate over the outputs produced by the different levels
                     pred_depth = preprocess(pred["depth"])
-
+                    tf.print(pred_depth.shape)
                     # Compute loss term
                     b, h, w = pred_depth.get_shape().as_list()[:3]
                     nbre_points += h * w
