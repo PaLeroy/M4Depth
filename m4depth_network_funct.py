@@ -1,10 +1,12 @@
 import sys
+from datetime import datetime
 
 import tensorflow as tf
 import numpy as np
 from tensorflow import keras as ks, float32
 from utils.depth_operations_functionnal import get_rot_mat, \
     get_disparity_sweeping_cv, prev_d2disp, disp2depth, cost_volume, depth2disp
+from utils.depth_operations import reproject
 from dataloaders.midair import DataLoaderMidAir as MidAir
 from dataloaders import DataloaderParameters
 
@@ -81,9 +83,11 @@ def domain_normalization_as_a_function(f_map, regularizer_weight):
         (normed)
     return to_ret
 
-
+@tf.function
 def log_tensor_companion(x):
-    print("log tensor shape", x[1], x[0].shape)
+    count = tf.math.count_nonzero(tf.math.is_nan(x[0]))
+    if count != 0:
+        tf.print("nan found", x[1])
     return x
 
 
@@ -195,7 +199,9 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
             name=layer_string + "_Encoder_s2")(x)
         x = ks.layers.LeakyReLU(0.1, name=layer_string + "_f_enc_L_t")(
             conv_layers_s2_output)
+        x = log_tensor(x, layer_string + "_f_enc_L_t")
         encoder_output_list_per_level.append(x)
+
 
     all_output_list = []
 
@@ -298,6 +304,9 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         f_enc_L_t = ks.layers.Reshape((h, w, -1,),
                                       name=layer_string + "_concat_cuts")(
             f_enc_L_t)
+        f_enc_L_t = log_tensor(f_enc_L_t, layer_string + 'f_enc_L_t')
+
+        depth_L_t1 = log_tensor(depth_L_t1, layer_string + ' depth_L_t1')
         prev_d2disp_function = \
             lambda inp: prev_d2disp(inp[0], inp[1], inp[2], inp[3], inp[4])
         prev_d2disp_layer = ks.layers.Lambda(prev_d2disp_function,
@@ -305,6 +314,8 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
                                                   + "_prev_d2disp")
         disp_L_t1 = prev_d2disp_layer((depth_L_t1, local_rot, local_trans,
                                        local_camera_c, local_camera_f))
+
+        disp_L_t1 = log_tensor(disp_L_t1, layer_string + ' disp_L_t1')
         # disp_L_t1 = prev_d2disp(depth_L_t1, local_rot,
         #                         local_trans, local_camera_c, local_camera_f)
 
@@ -320,6 +331,7 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
             get_disparity_sweeping_cv_layer((f_enc_L_t, f_enc_L_t1, disp_L_t1,
                                              disp_L1_t, local_rot, local_trans,
                                              local_camera_c, local_camera_f,))
+        cv = log_tensor(cv, layer_string + 'cv')
         # cv, disp_prev_t_reproj = \
         #     get_disparity_sweeping_cv(f_enc_L_t, f_enc_L_t1, disp_L_t1,
         #                               disp_L1_t, local_rot, local_trans,
@@ -331,6 +343,8 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
                                                "nbre_cuts": nbre_cuts},
                                     name=layer_string + "_autocorr_function") \
             (f_enc_L_t)
+        autocorr = log_tensor(autocorr, layer_string + 'autocorr')
+
         # autocorr = cost_volume(f_enc_L_t, f_enc_L_t, 3,
         # nbre_cuts=nbre_cuts, name=layer_string+"_autocorr_function")
 
@@ -344,12 +358,14 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         disp_prev_t_reproj = tf.math.log(
             disp_prev_t_reproj[:, :, :, 4:5] * 2 ** lvl_mul,
             name=layer_string + "disp_prev_t_reproj_log_function")
-
+        disp_prev_t_reproj = log_tensor(disp_prev_t_reproj, layer_string + 'disp_prev_t_reproj')
         # disp_L1_t_log_function = lambda x: tf.math.log(x*2**lvl_mul)
         # disp_L1_t = ks.layers.Lambda(disp_L1_t_log_function,
         # name=layer_string+"_disp_L-1_t_log_function")(disp_L1_t)
         disp_L1_t = tf.math.log(disp_L1_t * 2 ** lvl_mul,
                                 name=layer_string + "_disp_L-1_t_log_function")
+        disp_L1_t = log_tensor(disp_L1_t, layer_string + 'disp_L1_t')
+
         f_input = \
             ks.layers.Concatenate(
                 axis=-1,
@@ -371,15 +387,16 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
                 name=layer_string + "_Concatenate_disp_prev_t_reproj")(
                 [f_input, disp_prev_t_reproj])
 
+        f_input = log_tensor(f_input,layer_string +  'f_input')
         prev_out = disp_refiner_as_a_function(
             regularizer_weight=regularizer_weight,
             name=layer_string + "_disp_refiner", feature_map=f_input)
 
+
         # slicing_disp_function = lambda x: x[0][:, :, :, :1]
         # disp = ks.layers.Lambda(slicing_disp_function,
         # name=layer_string + "_slicing_disp_function")(prev_out)
-        disp = prev_out[0][:, :, :, :1]
-
+        disp= prev_out[0][:, :, :, :1]
         # slicing_other_function = lambda x: x[0][:, :, :, 1:]
         # other = ks.layers.Lambda(slicing_other_function,
         # name=layer_string + "_slicing_other_function")(prev_out)
@@ -403,17 +420,27 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
 
         # These layers have no effect on value directly
         # but allow to isolate and rename variables
-        curr_l_est = {
-            layer_string + "_other": ks.layers.Layer(
-                name=layer_string + "_other_identity")
-            (tf.identity(other)),
-            layer_string + "_depth": ks.layers.Layer(
-                name=layer_string + "_depth_identity")
-            (tf.identity(depth_curr_l)),
-            layer_string + "_disp": ks.layers.Layer(
-                name=layer_string + "_disp_identity")
+        other_output = ks.layers.Layer(
+                name=layer_string + "_other_identity") \
+            (tf.identity(other))
+        depth_output = ks.layers.Layer(
+                name=layer_string + "_depth_identity") \
+            (tf.identity(depth_curr_l))
+        disp_output = ks.layers.Layer(
+                name=layer_string + "_disp_identity") \
             (tf.identity(disp_curr_l))
+
+        other_output = log_tensor(other_output, layer_string + 'other_output')
+        depth_output = log_tensor(depth_output, layer_string + 'depth_output')
+        disp_output = log_tensor(disp_output, layer_string + 'disp_output')
+        
+        curr_l_est = {
+            layer_string + "_other": other_output,
+            layer_string + "_depth": depth_output,
+            layer_string + "_disp": disp_output
         }
+
+
         d_est_all_levels.append(curr_l_est)
 
     all_output_list = []
@@ -446,6 +473,32 @@ class M4Depth(ks.models.Model):
         depths = []
         camera_c_input = camera["c"]
         camera_f_input = camera["f"]
+
+        # size is dependent of nbre_level
+        L_2_disp_L1_t_init = tf.ones((batch_size, 96, 96,
+                                 1))  # for all inputs TODO: maybe possible to hardcode it in the network?
+        L_2_other_L1_t_init = tf.zeros((batch_size, 96, 96,
+                                   4))  # for all inputs TODO: maybe possible to hardcode it in the network?
+
+        L_3_disp_L1_t_init = tf.ones((batch_size, 48, 48,
+                                      1))  # for all inputs TODO: maybe possible to hardcode it in the network?
+        L_3_other_L1_t_init = tf.zeros((batch_size, 48, 48,
+                                        4))  # for all inputs TODO: maybe possible to hardcode it in the network?
+
+        # Here we need a loop w.r.t nbre_level
+        L_3_f_enc_L_t1_init = tf.zeros(
+            (batch_size, 48, 48, 64))  # Only for the first element of a sequence
+        L_3_d_est_L_t1_init = tf.ones(
+            (batch_size, 48, 48, 1))  # Only for the first element of a sequence
+        L_2_f_enc_L_t1_init = tf.zeros(
+            (batch_size, 96, 96, 32))  # Only for the first element of a sequence
+        L_2_d_est_L_t1_init = tf.ones(
+            (batch_size, 96, 96, 1))  # Only for the first element of a sequence
+        L_1_f_enc_L_t1_init = tf.zeros(
+            (batch_size, 192, 192, 16))  # Only for the first element of a sequence
+        L_1_d_est_L_t1_init = tf.ones(
+            (batch_size, 192, 192, 1))  # Only for the first element of a sequence
+
         L_3_disp_L1_t = L_3_disp_L1_t_init
         L_3_other_L1_t = L_3_other_L1_t_init
         L_3_f_enc_L_t1 = L_3_f_enc_L_t1_init
@@ -481,6 +534,7 @@ class M4Depth(ks.models.Model):
             L_1_d_est_L_t1 = outputs[10]
 
             depths.append(({"depth": L_1_d_est_L_t1}, {"depth": L_2_d_est_L_t1}, {"depth": L_3_d_est_L_t1}))
+
         return depths
     @tf.function
     def train_step(self, data):
@@ -494,7 +548,6 @@ class M4Depth(ks.models.Model):
                 for key in attribute_list:
                     value_list = tf.unstack(data[key], axis=1)
                     for i, item in enumerate(value_list):
-                        shape = item.get_shape()
                         traj_samples[i][key] = item
                 gts = []
                 for sample in traj_samples:
@@ -515,109 +568,109 @@ class M4Depth(ks.models.Model):
             # Update weights
             self.optimizer.apply_gradients(zip(gradients, trainable_vars))
             # Update metrics (includes the metric that tracks the loss)
-        #
-        # with tf.name_scope("summaries"):
-        #     max_d = 200.
-        #     gt_d_clipped = tf.clip_by_value(traj_samples[-1]['depth'], 1.,
-        #                                     max_d)
-        #     tf.summary.image("RGB_im", traj_samples[-1]['RGB_im'],
-        #                      step=self.step_counter)
-        #     im_reproj, _ = reproject(traj_samples[-2]['RGB_im'],
-        #                              traj_samples[-1]['depth'],
-        #                              traj_samples[-1]['rot'],
-        #                              traj_samples[-1]['trans'], data["camera"])
-        #     tf.summary.image("camera_prev_t_reproj", im_reproj,
-        #                      step=self.step_counter)
-        #
-        #     tf.summary.image("depth_gt",
-        #                      tf.math.log(gt_d_clipped) / tf.math.log(max_d),
-        #                      step=self.step_counter)
-        #     for i, est in enumerate(preds[-1]):
-        #         d_est_clipped = tf.clip_by_value(est["depth"], 1., max_d)
-        #         self.summaries.append(
-        #             [tf.summary.image, "depth_lvl_%i" % i,
-        #              tf.math.log(d_est_clipped) / tf.math.log(max_d)])
-        #         tf.summary.image("depth_lvl_%i" % i,
-        #                          tf.math.log(d_est_clipped) / tf.math.log(
-        #                              max_d),
-        #                          step=self.step_counter)
 
-        # with tf.name_scope("metrics"):
-            # gt = gts[-1]["depth"]
-            # est = tf.image.resize(preds[-1][0]["depth"], gt.get_shape()[1:3],
-            #                       method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
-            #
-            # max_d = 80.
-            # gt = tf.clip_by_value(gt, 0.00, max_d)
-            # est = tf.clip_by_value(est, 0.001, max_d)
-            # self.compiled_metrics.update_state(gt, est)
-            # out_dict = {m.name: m.result() for m in self.metrics}
-            # out_dict["loss"] = loss
+        with tf.name_scope("summaries"):
+            max_d = 200.
+            gt_d_clipped = tf.clip_by_value(traj_samples[-1]['depth'], 1.,
+                                            max_d)
+            tf.summary.image("RGB_im", traj_samples[-1]['RGB_im'],
+                             step=self.step_counter)
+            im_reproj, _ = reproject(traj_samples[-2]['RGB_im'],
+                                     traj_samples[-1]['depth'],
+                                     traj_samples[-1]['rot'],
+                                     traj_samples[-1]['trans'], data["camera"])
+            tf.summary.image("camera_prev_t_reproj", im_reproj,
+                             step=self.step_counter)
+
+            tf.summary.image("depth_gt",
+                             tf.math.log(gt_d_clipped) / tf.math.log(max_d),
+                             step=self.step_counter)
+            for i, est in enumerate(preds[-1]):
+                d_est_clipped = tf.clip_by_value(est["depth"], 1., max_d)
+                self.summaries.append(
+                    [tf.summary.image, "depth_lvl_%i" % i,
+                     tf.math.log(d_est_clipped) / tf.math.log(max_d)])
+                tf.summary.image("depth_lvl_%i" % i,
+                                 tf.math.log(d_est_clipped) / tf.math.log(
+                                     max_d),
+                                 step=self.step_counter)
+
+        with tf.name_scope("metrics"):
+            gt = gts[-1]["depth"]
+            est = tf.image.resize(preds[-1][0]["depth"], gt.get_shape()[1:3],
+                                  method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+
+            max_d = 80.
+            gt = tf.clip_by_value(gt, 0.00, max_d)
+            est = tf.clip_by_value(est, 0.001, max_d)
+            self.compiled_metrics.update_state(gt, est)
+            out_dict = {m.name: m.result() for m in self.metrics}
+            out_dict["loss"] = loss
 
         # Return a dict mapping metric names to current value.
         # Note that it will include the loss (tracked in self.metrics).
-        return {"loss":loss}
-
-    @tf.function
-    def test_step(self, data):
-        # expects one sequence element at a time (batch dim required and is free to set)"
-        data_format = len(data["depth"].get_shape().as_list())
-
-        # If sequence was received as input, compute performance metrics only on its last frame (required for KITTI benchmark))
-        if data_format == 5:
-            seq_len = data["depth"].get_shape().as_list()[1]
-            traj_samples = [{} for i in range(seq_len)]
-            attribute_list = ["depth", "RGB_im", "new_traj", "rot", "trans"]
-            for key in attribute_list:
-                value_list = tf.unstack(data[key], axis=1)
-                for i, item in enumerate(value_list):
-                    shape = item.get_shape()
-                    traj_samples[i][key] = item
-
-            gts = []
-            for sample in traj_samples:
-                gts.append({"depth": sample["depth"],
-                            "disp": depth2disp(sample["depth"], sample["rot"],
-                                               sample["trans"],
-                                               data["camera"])})
-            preds = self([traj_samples, data["camera"]], training=False)
-            gt = data["depth"][:, -1, :, :, :]
-            est = preds["depth"]
-            new_traj = False
-        else:
-            preds = self([[data], data["camera"]], training=False)
-            gt = data["depth"]
-            est = preds["depth"]
-            new_traj = data["new_traj"]
-
-        with tf.name_scope("metrics"):
-            # Compute performance scores
-
-            max_d = 80.
-            gt = tf.clip_by_value(gt, 0.0, max_d)
-            est = tf.clip_by_value(est, 0.001, max_d)
-
-            if not new_traj:
-                self.compiled_metrics.update_state(gt, est)
-
-        # Return a dict mapping metric names to current value.
-        out_dict = {m.name: m.result() for m in self.metrics}
         return out_dict
 
     @tf.function
-    def predict_step(self, data):
-        # expects one sequence element at a time (batch dim is required a
-        # nd is free to be set)"
-        preds = self.full_model([[data], data["camera"]], training=False)
+    # def test_step(self, data):
+    #     # expects one sequence element at a time (batch dim required and is free to set)"
+    #     data_format = len(data["depth"].get_shape().as_list())
+    #
+    #     # If sequence was received as input, compute performance metrics only on its last frame (required for KITTI benchmark))
+    #     if data_format == 5:
+    #         seq_len = data["depth"].get_shape().as_list()[1]
+    #         traj_samples = [{} for i in range(seq_len)]
+    #         attribute_list = ["depth", "RGB_im", "new_traj", "rot", "trans"]
+    #         for key in attribute_list:
+    #             value_list = tf.unstack(data[key], axis=1)
+    #             for i, item in enumerate(value_list):
+    #                 shape = item.get_shape()
+    #                 traj_samples[i][key] = item
+    #
+    #         gts = []
+    #         for sample in traj_samples:
+    #             gts.append({"depth": sample["depth"],
+    #                         "disp": depth2disp(sample["depth"], sample["rot"],
+    #                                            sample["trans"],
+    #                                            data["camera"])})
+    #         preds = self([traj_samples, data["camera"]], training=False)
+    #         gt = data["depth"][:, -1, :, :, :]
+    #         est = preds["depth"]
+    #         new_traj = False
+    #     else:
+    #         preds = self([[data], data["camera"]], training=False)
+    #         gt = data["depth"]
+    #         est = preds["depth"]
+    #         new_traj = data["new_traj"]
+    #
+    #     with tf.name_scope("metrics"):
+    #         # Compute performance scores
+    #
+    #         max_d = 80.
+    #         gt = tf.clip_by_value(gt, 0.0, max_d)
+    #         est = tf.clip_by_value(est, 0.001, max_d)
+    #
+    #         if not new_traj:
+    #             self.compiled_metrics.update_state(gt, est)
+    #
+    #     # Return a dict mapping metric names to current value.
+    #     out_dict = {m.name: m.result() for m in self.metrics}
+    #     return out_dict
 
-        est = preds
-
-        return_data = {
-            "image": data["RGB_im"],
-            "depth": est["depth"],
-            "new_traj": data["new_traj"]
-        }
-        return return_data
+    # @tf.function
+    # def predict_step(self, data):
+    #     # expects one sequence element at a time (batch dim is required a
+    #     # nd is free to be set)"
+    #     preds = self.full_model([[data], data["camera"]], training=False)
+    #
+    #     est = preds
+    #
+    #     return_data = {
+    #         "image": data["RGB_im"],
+    #         "depth": est["depth"],
+    #         "new_traj": data["new_traj"]
+    #     }
+    #     return return_data
 
     @tf.function
     def m4depth_loss(self, gts, preds):
@@ -633,6 +686,9 @@ class M4Depth(ks.models.Model):
                 nbre_points = 0.
 
                 gt_preprocessed = preprocess(gt["depth"])
+                count = tf.math.count_nonzero(tf.math.is_nan(gt_preprocessed))
+                if count != 0:
+                    tf.print("error gt_preprocessed", count)
 
                 def masked_reduce_mean(array, mask, axis=None):
                     return tf.reduce_sum(array * mask, axis=axis) / (
@@ -640,18 +696,26 @@ class M4Depth(ks.models.Model):
 
                 for i, pred in enumerate(
                         pred_pyr):  # Iterate over the outputs produced by the different levels
+
+                    count = tf.math.count_nonzero(tf.math.is_nan(pred["depth"]))
+                    if count != 0:
+                        tf.print("error before preprocess pred[depth]", i, count)
+
                     pred_depth = preprocess(pred["depth"])
+
 
                     # Compute loss term
                     b, h, w = pred_depth.get_shape().as_list()[:3]
                     nbre_points += h * w
 
                     gt_resized = tf.image.resize(gt_preprocessed, [h, w])
+
                     l1_loss_term = (0.64 / (
                             2. ** (i - 1))) * tf.reduce_mean(
                         tf.abs(gt_resized - pred_depth))
 
                     l1_loss += l1_loss_term / (float(len(gts) - 1))
+
             return l1_loss
 
     def save_h5(self, name):
@@ -663,84 +727,42 @@ class M4Depth(ks.models.Model):
 
 param = DataloaderParameters({
     '_comment': '/Users/pascalleroy/Documents/m4depth/M4Depth/relative paths should be written relative to this file',
-    'midair': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/MidAir',
+    'midair': '/mnt/ssd2/midair/MidAir',
     'kitti-raw': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/Kitti',
     'tartanair': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/TartanAir'},
-    'data/midair/small_train_data',
+    'data/midair/train_data',
     8,  # db_seq_len
     4,  # seq_len
     True)
-chosen_dataloader = MidAir()
+
 batch_size = 2
+n_lvl = 3
+chosen_dataloader = MidAir()
 chosen_dataloader.get_dataset("train", param, batch_size=batch_size)
 data = chosen_dataloader.dataset
 
-# model.summary()
-# name = "m4depth_model_L_" + str(n_lvl) + ".h5"
-# model.save_h5(name)
-# from keras.utils import vis_utils
-# name = "m4depth_model_L_" + str(n_lvl) + ".png"
-# vis_utils.plot_model(model, to_file=name, show_shapes=False, expand_nested=False)
 
-
-n_lvl = 3
-# model = M4Depth_functionnal_model(nbre_levels=n_lvl)
-# for idx, i in enumerate(model.outputs):
-#     print("output ", idx, i)
-# name = "m4depth_model_L_" + str(n_lvl) + ".h5"
-# model.save( name,  save_format="h5",   )
-# vis_utils.plot_model(model, to_file="custom.png", show_shapes=True,
-#                      expand_nested=False)
-#
-
-# image = tf.random.uniform((batch_size, 384, 384, 3))
-# camera_f_input = tf.random.uniform ((batch_size, 2))
-# camera_c_input = tf.random.uniform ((batch_size, 2))
-# rot_input = tf.random.uniform ((batch_size, 4))
-# trans_input = tf.random.uniform ((batch_size, 3))
-
-# size is dependent of nbre_level
-L_2_disp_L1_t = tf.ones((batch_size, 96, 96,
-                         1))  # for all inputs TODO: maybe possible to hardcode it in the network?
-L_2_other_L1_t = tf.zeros((batch_size, 96, 96,
-                           4))  # for all inputs TODO: maybe possible to hardcode it in the network?
-
-L_3_disp_L1_t_init = tf.ones((batch_size, 48, 48,
-                         1))  # for all inputs TODO: maybe possible to hardcode it in the network?
-L_3_other_L1_t_init = tf.zeros((batch_size, 48, 48,
-                           4))  # for all inputs TODO: maybe possible to hardcode it in the network?
-
-# Here we need a loop w.r.t nbre_level
-L_3_f_enc_L_t1_init  = tf.zeros(
-    (batch_size, 48, 48, 64))  # Only for the first element of a sequence
-L_3_d_est_L_t1_init  = tf.ones(
-    (batch_size, 48, 48, 1))  # Only for the first element of a sequence
-L_2_f_enc_L_t1_init  = tf.zeros(
-    (batch_size, 96, 96, 32))  # Only for the first element of a sequence
-L_2_d_est_L_t1_init  = tf.ones(
-    (batch_size, 96, 96, 1))  # Only for the first element of a sequence
-L_1_f_enc_L_t1_init  = tf.zeros(
-    (batch_size, 192, 192, 16))  # Only for the first element of a sequence
-L_1_d_est_L_t1_init  = tf.ones(
-    (batch_size, 192, 192, 1))  # Only for the first element of a sequence
 
 
 print("-------------")
 print()
 print()
 model = M4Depth(nbre_levels=n_lvl)
-
-# tensorboard_cbk = ks.callbacks.TensorBoard(
-#     log_dir="log_dir", histogram_freq=1200, write_graph=True,
-#     write_images=False, update_freq=1200,
-#     profile_batch=0, embeddings_freq=0, embeddings_metadata=None)
-# weights_dir = os.path.join("pretrained_weights/midair/", "train")
-# model_checkpoint_cbk = CustomCheckpointCallback(weights_dir, resume_training=True)
+now = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
+now = "small_data"
+tensorboard_cbk = ks.callbacks.TensorBoard(
+    log_dir="log_dir/" + now, histogram_freq=0, write_graph=False,
+    write_images=False, update_freq="batch",
+    profile_batch=0, embeddings_freq=0, embeddings_metadata=None)
+weights_dir = os.path.join("pretrained_weights/midair/", "train", now)
+model_checkpoint_cbk = CustomCheckpointCallback(weights_dir, resume_training=True)
 
 opt = tf.keras.optimizers.Adam(learning_rate=0.0001)
 model.compile(optimizer=opt, metrics=[RootMeanSquaredLogError()])
-nbre_epochs = 1
-model.fit(data, epochs=nbre_epochs)
+nbre_epochs = (220000 // chosen_dataloader.length)
+
+model.fit(data, epochs=nbre_epochs, callbacks=[tensorboard_cbk, model_checkpoint_cbk])
+
 
 # for idx_data, data in enumerate(data):
 #     print("batch", idx_data)

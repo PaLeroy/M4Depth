@@ -148,7 +148,7 @@ def reproject(map, depth, rot, trans, camera):
         combined_mat = tf.reshape(combined_mat, [b, 1, 1, 3, 4])
 
         # Get the relative coordinates for each point of the map
-        coords, mesh = get_coords_2d(map, camera)
+        coords, mesh = get_coords_2d(map, camera["c"], camera["f"])
         pos_vec = tf.expand_dims(
             tf.concat([coords[:, :, :, :, 0] * depth, tf.ones([b, h, w, 1])],
                       axis=-1), axis=-1)
@@ -352,26 +352,61 @@ def depth2disp_former(depth, rot, trans, camera):
 def prev_d2disp(prev_d, rot, trans, camera_c, camera_f):
     """ Converts depth map corresponding to previous time step into the disparity map corresponding to current time step """
     b, h, w = prev_d.get_shape().as_list()[0:3]
+    count = tf.math.count_nonzero(tf.math.is_nan(prev_d))
+    if count != 0:
+        tf.print("nan found prev_d args 1")
+        print("nan found prev_d args 1")
 
     coords2d, _ = get_coords_2d(prev_d, camera_c, camera_f)
     prev_d = ks.layers.Reshape([h * w, 1, 1, ],)(prev_d)
     coords2d = ks.layers.Reshape([h * w, 3, 1, ], )(coords2d)
 
+    count = tf.math.count_nonzero(tf.math.is_nan(prev_d))
+    if count != 0:
+        tf.print("nan found prev_d reshaped 2")
+        print("nan found prev_d reshaped 2")
+
     t = ks.layers.Reshape([1, 3, 1, ],)(trans)
     myconst = tf.convert_to_tensor(np.ones((1, 1)).astype('float32'))
     ones_ = tf.keras.layers.Lambda(lambda x: repeat_const(x, myconst))(camera_f)
     f_vec = ks.layers.Concatenate(axis=1)([camera_f, ones_])
-    f_vec =  ks.layers.Reshape((1, 3, 1,),)(f_vec)
+    f_vec = ks.layers.Reshape((1, 3, 1,),)(f_vec)
 
     coords2d = coords2d * f_vec
     scaled_t = t * f_vec
 
-    delta = (scaled_t - t[:, :, -1:, :] * coords2d) / (
-                prev_d - t[:, :, -1:, :])
+    count = tf.math.count_nonzero(tf.math.is_nan(coords2d))
+    if count != 0:
+        tf.print("nan found coords2d")
+        print("nan found coords2d")
+
+    count = tf.math.count_nonzero(tf.math.is_nan(scaled_t))
+    if count != 0:
+        tf.print("nan found scaled_t")
+        print("nan found scaled_t")
+
+    count = tf.math.count_nonzero(tf.math.is_nan(prev_d))
+    if count != 0:
+        tf.print("nan found prev_d")
+        print("nan found prev_d")
+
+    # delta = (scaled_t - t[:, :, -1:, :] * coords2d) / (
+    #             prev_d - t[:, :, -1:, :])
+
+    delta = tf.math.divide_no_nan(scaled_t - t[:, :, -1:, :] * coords2d, prev_d - t[:, :, -1:, :])
+
+    count = tf.math.count_nonzero(tf.math.is_nan(delta))
+    if count != 0:
+        tf.print("nan found delta")
+        print("nan found delta")
 
     disp = tf.norm(delta[:, :, :2, :], axis=2)
     disp = ks.layers.Reshape([h, w, 1,], )(disp)
     disp = tf.stop_gradient(disp)
+    count = tf.math.count_nonzero(tf.math.is_nan(disp))
+    if count != 0:
+        tf.print("nan found disp")
+        print("nan found disp")
     return disp
 
 @tf.function
@@ -467,7 +502,8 @@ def get_disparity_sweeping_cv(inp, search_range, nbre_cuts=1):
     c1 = tile_not_in_batch(c1, nbre_copies)
     combined_data = tile_not_in_batch(tf.concat([c2, disp_prev_t], axis=-1),
                                   nbre_copies)
-    combined_data_w = dense_image_warp(combined_data, flow)
+    #combined_data_w = dense_image_warp(combined_data, flow)
+    combined_data_w = combined_data
     c2_w = combined_data_w[..., :-1]
     prev_disp = combined_data_w[..., -1]
     # Compute costs (operations performed in float16 for speedup)
@@ -478,6 +514,7 @@ def get_disparity_sweeping_cv(inp, search_range, nbre_cuts=1):
     cv_to_cast = tf.reshape(cv, [-1, (nbre_cuts) * nbre_copies, h, w])
     cv = tf.cast(tf.transpose(cv_to_cast, perm=[0, 2, 3, 1]), tf.float32)
     prev_disp = tf.transpose(prev_disp, perm=[0, 2, 3, 1])
+
     return cv, prev_disp
 
 @tf.function
