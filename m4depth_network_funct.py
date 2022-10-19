@@ -451,23 +451,53 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         for k, v in i.items():
             all_output_list.append(v)
 
-    return ks.Model(inputs=inputs_list, outputs=encoder_output_list_per_level+all_output_list)
+    return ks.Model(inputs=inputs_list, outputs=encoder_output_list_per_level+all_output_list), all_filter_sizes
 
 
 class M4Depth(ks.models.Model):
     """Tensorflow model of M4Depth"""
 
-    def __init__(self, nbre_levels=6, regularizer_weight=0.):
+    def __init__(self, n_levels=6, regularizer_weight=0.):
         super(M4Depth, self).__init__()
         regularizer_weight = 0.
 
-        self.full_model = M4Depth_functionnal_model(nbre_levels,
+        self.full_model, self.all_filter_sizes = M4Depth_functionnal_model(n_levels,
                                                     regularizer_weight=regularizer_weight)
+        self.n_levels = n_levels
+        self.h = 384
+        self.w = 384
         self.step_counter = tf.Variable(
             initial_value=tf.zeros_initializer()(shape=[], dtype='int64'),
             trainable=False)
         self.summaries = []
 
+        self.batch_size = 1
+
+    def inputs_init_seq(self, batch_size):
+        # Inputs for the beginning of a sequence -> once per seq
+        # Starting from the bottom of the U -> (L3, L2, L1)
+        dict_inputs = {}
+        h = self.h
+        w = self.w
+        for i in range(self.n_levels):
+            h = int(h/2)
+            w = int(w/2)
+            last_dim = self.all_filter_sizes[i]
+            dict_inputs["L_"+str(i+1)+"_f_enc_L_t1_init"] = tf.zeros((batch_size, h, w, last_dim))
+            dict_inputs["L_"+str(i+1)+"_d_est_L_t1_init"] = tf.ones((batch_size, h, w, 1))
+
+        return dict_inputs
+
+    def inputs_init_step(self, batch_size):
+        # Inputs for the bottom of the U net -> at each call
+        # TODO: maybe possible to hardcode it in the network?
+        h = int(self.h / (2 ** self.n_levels))
+        w = int(self.w / (2 ** self.n_levels))
+        disp_L1_t_init = tf.ones((batch_size, h, w, 1))
+        other_L1_t_init = tf.zeros((batch_size, h, w, 4))
+
+        return {"disp_L1_t_init":disp_L1_t_init,
+                "other_L1_t_init":other_L1_t_init}
     @tf.function
     def call(self, data):
         self.step_counter.assign_add(1)
@@ -478,39 +508,16 @@ class M4Depth(ks.models.Model):
         camera_c_input = camera["c"]
         camera_f_input = camera["f"]
 
-        # size is dependent of nbre_level
-        L_2_disp_L1_t_init = tf.ones((batch_size, 96, 96,
-                                 1))  # for all inputs TODO: maybe possible to hardcode it in the network?
-        L_2_other_L1_t_init = tf.zeros((batch_size, 96, 96,
-                                   4))  # for all inputs TODO: maybe possible to hardcode it in the network?
-
-        L_3_disp_L1_t_init = tf.ones((batch_size, 48, 48,
-                                      1))  # for all inputs TODO: maybe possible to hardcode it in the network?
-        L_3_other_L1_t_init = tf.zeros((batch_size, 48, 48,
-                                        4))  # for all inputs TODO: maybe possible to hardcode it in the network?
-
-        # Here we need a loop w.r.t nbre_level
-        L_3_f_enc_L_t1_init = tf.zeros(
-            (batch_size, 48, 48, 64))  # Only for the first element of a sequence
-        L_3_d_est_L_t1_init = tf.ones(
-            (batch_size, 48, 48, 1))  # Only for the first element of a sequence
-        L_2_f_enc_L_t1_init = tf.zeros(
-            (batch_size, 96, 96, 32))  # Only for the first element of a sequence
-        L_2_d_est_L_t1_init = tf.ones(
-            (batch_size, 96, 96, 1))  # Only for the first element of a sequence
-        L_1_f_enc_L_t1_init = tf.zeros(
-            (batch_size, 192, 192, 16))  # Only for the first element of a sequence
-        L_1_d_est_L_t1_init = tf.ones(
-            (batch_size, 192, 192, 1))  # Only for the first element of a sequence
-
-        L_3_disp_L1_t = L_3_disp_L1_t_init
-        L_3_other_L1_t = L_3_other_L1_t_init
-        L_3_f_enc_L_t1 = L_3_f_enc_L_t1_init
-        L_3_d_est_L_t1 = L_3_d_est_L_t1_init
-        L_2_f_enc_L_t1 = L_2_f_enc_L_t1_init
-        L_2_d_est_L_t1 = L_2_d_est_L_t1_init
-        L_1_f_enc_L_t1 = L_1_f_enc_L_t1_init
-        L_1_d_est_L_t1 = L_1_d_est_L_t1_init
+        # inputs_recurrent = [f, d, f, d, f, d] starting at the lowest level
+        batch_size = traj_samples[0]["rot"].shape[0]
+        inputs_init_seq = self.inputs_init_seq(batch_size)
+        inputs_recurrent = []
+        for i in range(self.n_levels, 0, -1):
+            tf.print(i)
+            key = "L_"+str(i)+"_f_enc_L_t1_init"
+            inputs_recurrent.append(inputs_init_seq[key])
+            key = "L_" + str(i) + "_d_est_L_t1_init"
+            inputs_recurrent.append(inputs_init_seq[key])
 
         for idx_sample, sample in enumerate(traj_samples):
             # for each elem of the sequence
@@ -518,28 +525,35 @@ class M4Depth(ks.models.Model):
             rot_input = sample["rot"]
             trans_input = sample["trans"]
 
+            inputs_init_step = self.inputs_init_step(batch_size)
+            disp_L1_t = inputs_init_step["disp_L1_t_init"]
+            other_L1_t = inputs_init_step["other_L1_t_init"]
+
             inputs = [image, camera_f_input, camera_c_input, rot_input,
-                      trans_input,
-                      L_3_disp_L1_t, L_3_other_L1_t,
-                      L_3_f_enc_L_t1, L_3_d_est_L_t1,
-                      L_2_f_enc_L_t1, L_2_d_est_L_t1,
-                      L_1_f_enc_L_t1, L_1_d_est_L_t1]
+                      trans_input, disp_L1_t, other_L1_t] + inputs_recurrent
+
             outputs = self.full_model(inputs)
+            # outputs= [encoder, decoder]
+            # encoder = one per level, starting from the highest
+            # decoder = three per level, starting from the lowest
 
-            L_3_disp_L1_t = L_3_disp_L1_t_init
-            L_3_other_L1_t = L_3_other_L1_t_init
+            # first update the recurrent inputs with the encoder
+            for i in range(self.n_levels):
+                # outputs[i] is L_(i+1)_f_enc_L_t1
+                # -> inputs_recurrent[(n-i-1)*2]
+                inputs_recurrent[(self.n_levels - i - 1) * 2] = outputs[i]
+            list_depth = []
+            for i in range(self.n_levels):
+                j = i * 3 + 1
+                # outputs[n+i*3] is other, outputs_[n+i*3+2] is disp
+                # outputs[n+i*3+1] is L_(i+1)_d_est_L_t1
+                inputs_recurrent[i * 2 + 1] = outputs[self.n_levels+j]
+                list_depth.append({"depth": outputs[self.n_levels+j]})
 
-            L_1_f_enc_L_t1 = outputs[0]
-            L_2_f_enc_L_t1 = outputs[1]
-            L_3_f_enc_L_t1 = outputs[2]
-
-            L_3_d_est_L_t1 = outputs[4]
-            L_2_d_est_L_t1 = outputs[7]
-            L_1_d_est_L_t1 = outputs[10]
-
-            depths.append(({"depth": L_1_d_est_L_t1}, {"depth": L_2_d_est_L_t1}, {"depth": L_3_d_est_L_t1}))
+            depths.append(list_depth)
 
         return depths
+    
     @tf.function
     def train_step(self, data):
         with tf.name_scope("train_scope"):
@@ -763,67 +777,69 @@ class M4Depth(ks.models.Model):
         )
 
 
-param = DataloaderParameters({
+if __name__ == '__main__':
+
+    param = DataloaderParameters({
     '_comment': '/Users/pascalleroy/Documents/m4depth/M4Depth/relative paths should be written relative to this file',
     'midair': '/mnt/ssd2/midair/MidAir',
     'kitti-raw': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/Kitti',
     'tartanair': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/TartanAir'},
     'data/midair/train_data',
-    8,  # db_seq_len
-    4,  # seq_len
-    True)
+        8,  # db_seq_len
+        4,  # seq_len
+        True)
 
-batch_size = 2
-n_lvl = 3
-chosen_dataloader = MidAir()
-chosen_dataloader.get_dataset("train", param, batch_size=batch_size)
-data = chosen_dataloader.dataset
-
-
+    batch_size = 2
+    n_lvl = 3
+    chosen_dataloader = MidAir()
+    chosen_dataloader.get_dataset("train", param, batch_size=batch_size)
+    data = chosen_dataloader.dataset
 
 
-print("-------------")
-print()
-print()
-model = M4Depth(nbre_levels=n_lvl)
-now = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
-tensorboard_cbk = ks.callbacks.TensorBoard(
-    log_dir="log_dir/" + now, histogram_freq=0, write_graph=False,
-    write_images=False, update_freq="batch",
-    profile_batch=0, embeddings_freq=0, embeddings_metadata=None)
-
-now = "new_test"
-weights_dir = os.path.join("pretrained_weights/midair/", "train", now)
-model_checkpoint_cbk = CustomCheckpointCallback(weights_dir, resume_training=True)
-
-opt = tf.keras.optimizers.Adam(learning_rate=0.00005)
-model.compile(optimizer=opt, metrics=[RootMeanSquaredLogError()])
-nbre_epochs = (220000 // chosen_dataloader.length)
-
-model.fit(data, epochs=nbre_epochs, callbacks=[tensorboard_cbk, model_checkpoint_cbk])
 
 
-# for idx_data, data in enumerate(data):
-#     print("batch", idx_data)
-#     # iterate over dataset
-#     seq_len = data["depth"].get_shape().as_list()[1]
-#     traj_samples = [{} for i in range(seq_len)]
-#     attribute_list = ["depth", "RGB_im", "new_traj", "rot", "trans"]
-#     for key in attribute_list:
-#         value_list = tf.unstack(data[key], axis=1)
-#         for i, item in enumerate(value_list):
-#             shape = item.get_shape()
-#             traj_samples[i][key] = item
-#     gts = []
-#     for sample in traj_samples:
-#         gts.append({"depth": sample["depth"],
-#                     "disp": depth2disp(sample["depth"],
-#                                        sample["rot"],
-#                                        sample["trans"],
-#                                        data["camera"]["c"],
-#                                        data["camera"]["f"])})
-#     preds = model((traj_samples, data["camera"]))
-#
-#     loss = model.m4depth_loss(gts, preds)
-#     print("loss: ", loss)
-#     tf.print("loss: ", loss)
+    print("-------------")
+    print()
+    print()
+    model = M4Depth(n_levels=n_lvl)
+    now = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
+    tensorboard_cbk = ks.callbacks.TensorBoard(
+        log_dir="log_dir/" + now, histogram_freq=0, write_graph=False,
+        write_images=False, update_freq="batch",
+        profile_batch=0, embeddings_freq=0, embeddings_metadata=None)
+
+    now = "new_test"
+    weights_dir = os.path.join("pretrained_weights/midair/", "train", now)
+    model_checkpoint_cbk = CustomCheckpointCallback(weights_dir, resume_training=True)
+
+    opt = tf.keras.optimizers.Adam(learning_rate=0.00005)
+    model.compile(optimizer=opt, metrics=[RootMeanSquaredLogError()])
+    nbre_epochs = (220000 // chosen_dataloader.length)
+
+    model.fit(data, epochs=nbre_epochs, callbacks=[tensorboard_cbk, model_checkpoint_cbk])
+
+
+    # for idx_data, data in enumerate(data):
+    #     print("batch", idx_data)
+    #     # iterate over dataset
+    #     seq_len = data["depth"].get_shape().as_list()[1]
+    #     traj_samples = [{} for i in range(seq_len)]
+    #     attribute_list = ["depth", "RGB_im", "new_traj", "rot", "trans"]
+    #     for key in attribute_list:
+    #         value_list = tf.unstack(data[key], axis=1)
+    #         for i, item in enumerate(value_list):
+    #             shape = item.get_shape()
+    #             traj_samples[i][key] = item
+    #     gts = []
+    #     for sample in traj_samples:
+    #         gts.append({"depth": sample["depth"],
+    #                     "disp": depth2disp(sample["depth"],
+    #                                        sample["rot"],
+    #                                        sample["trans"],
+    #                                        data["camera"]["c"],
+    #                                        data["camera"]["f"])})
+    #     preds = model((traj_samples, data["camera"]))
+    #
+    #     loss = model.m4depth_loss(gts, preds)
+    #     print("loss: ", loss)
+    #     tf.print("loss: ", loss)
