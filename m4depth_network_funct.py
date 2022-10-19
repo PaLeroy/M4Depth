@@ -113,12 +113,15 @@ def disp_refiner_as_a_function(regularizer_weight, name, feature_map):
         for i, nbre_filters in enumerate(conv_channels)
     ]
     prev_out = tf.identity(feature_map)
-
+    prev_out = log_tensor(prev_out, "prev_out_before")
     for i, conv in enumerate(prep_conv_layers):
+        prev_out = log_tensor(prev_out, name + "just before before prev_out_before conv" + str(i))
         prev_out = conv(prev_out)
+        prev_out = log_tensor(prev_out, name + "prev_out_before conv" + str(i))
         prev_out = ks.layers.LeakyReLU(0.1,
                                        name=name + "_prep_conv_layers_ReLu_" + str(
                                            i))(prev_out)
+        prev_out = log_tensor(prev_out, "prev_out_before leaky" + str(i))
 
     prev_outs = [prev_out, prev_out]
 
@@ -300,7 +303,7 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         # name=layer_string+ "_normalise_cuts")(f_enc_L_t)
         f_enc_L_t = tf.math.l2_normalize(f_enc_L_t, axis=-1,
                                          name=layer_string + "_normalise_cuts")
-
+        f_enc_L_t = log_tensor(f_enc_L_t, layer_string + 'f_enc_L_t l2_normalize')
         f_enc_L_t = ks.layers.Reshape((h, w, -1,),
                                       name=layer_string + "_concat_cuts")(
             f_enc_L_t)
@@ -467,6 +470,7 @@ class M4Depth(ks.models.Model):
 
     @tf.function
     def call(self, data):
+        self.step_counter.assign_add(1)
         # Traj samples items are [batch_size, seq_len, ....]
         traj_samples = data[0]
         camera = data[1]
@@ -560,40 +564,71 @@ class M4Depth(ks.models.Model):
                 preds = model((traj_samples, data["camera"]))
 
                 loss = model.m4depth_loss(gts, preds)
+            count = tf.math.count_nonzero(tf.math.is_nan(loss))
+            if count != 0:
+                tf.print("nan found loss")
 
             # Compute gradients
             trainable_vars = self.trainable_variables
             gradients = tape.gradient(loss, trainable_vars)
-
             # Update weights
             self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+
+
+
+
+            for weights, grads in zip(self.full_model.trainable_weights, gradients):
+                count = tf.math.count_nonzero(tf.math.is_nan(grads))
+                if count != 0:
+                    tf.print("nan found gradients", weights.name.replace(':', '_') + '_grads')
+
+                count = tf.math.count_nonzero(tf.math.is_nan(weights))
+                if count != 0:
+                    tf.print("nan found weights", weights.name.replace(':', '_') + '_weights')
+
+                tf.summary.histogram(weights.name.replace(':', '_') + '_grads', data=grads, step=self.step_counter)
+                abs_grad=tf.abs(grads)
+                tf.summary.scalar(weights.name.replace(':', '_') + '_grads_mean', data=tf.reduce_mean(abs_grad), step=self.step_counter)
+                tf.summary.scalar(weights.name.replace(':', '_') + '_grads_min', data=tf.reduce_min(abs_grad), step=self.step_counter)
+                tf.summary.scalar(weights.name.replace(':', '_') + '_grads_max', data=tf.reduce_max(abs_grad), step=self.step_counter)
+
+                tf.summary.histogram(weights.name.replace(':', '_') + '_weights', data=weights, step=self.step_counter)
+                tf.summary.scalar(weights.name.replace(':', '_') + '_weights_mean', data=tf.reduce_mean(weights),
+                                  step=self.step_counter)
+                tf.summary.scalar(weights.name.replace(':', '_') + '_weights_min', data=tf.reduce_min(weights),
+                                  step=self.step_counter)
+                tf.summary.scalar(weights.name.replace(':', '_') + '_weights_max', data=tf.reduce_max(weights),
+                                  step=self.step_counter)
+
+
+
             # Update metrics (includes the metric that tracks the loss)
 
-        with tf.name_scope("summaries"):
-            max_d = 200.
-            gt_d_clipped = tf.clip_by_value(traj_samples[-1]['depth'], 1.,
-                                            max_d)
-            tf.summary.image("RGB_im", traj_samples[-1]['RGB_im'],
-                             step=self.step_counter)
-            im_reproj, _ = reproject(traj_samples[-2]['RGB_im'],
-                                     traj_samples[-1]['depth'],
-                                     traj_samples[-1]['rot'],
-                                     traj_samples[-1]['trans'], data["camera"])
-            tf.summary.image("camera_prev_t_reproj", im_reproj,
-                             step=self.step_counter)
-
-            tf.summary.image("depth_gt",
-                             tf.math.log(gt_d_clipped) / tf.math.log(max_d),
-                             step=self.step_counter)
-            for i, est in enumerate(preds[-1]):
-                d_est_clipped = tf.clip_by_value(est["depth"], 1., max_d)
-                self.summaries.append(
-                    [tf.summary.image, "depth_lvl_%i" % i,
-                     tf.math.log(d_est_clipped) / tf.math.log(max_d)])
-                tf.summary.image("depth_lvl_%i" % i,
-                                 tf.math.log(d_est_clipped) / tf.math.log(
-                                     max_d),
-                                 step=self.step_counter)
+        # with tf.name_scope("summaries"):
+        #     max_d = 200.
+        #     gt_d_clipped = tf.clip_by_value(traj_samples[-1]['depth'], 1.,
+        #                                     max_d)
+        #     tf.summary.image("RGB_im", traj_samples[-1]['RGB_im'],
+        #                      step=self.step_counter)
+        #     im_reproj, _ = reproject(traj_samples[-2]['RGB_im'],
+        #                              traj_samples[-1]['depth'],
+        #                              traj_samples[-1]['rot'],
+        #                              traj_samples[-1]['trans'], data["camera"])
+        #     tf.summary.image("camera_prev_t_reproj", im_reproj,
+        #                      step=self.step_counter)
+        #
+        #     tf.summary.image("depth_gt",
+        #                      tf.math.log(gt_d_clipped) / tf.math.log(max_d),
+        #                      step=self.step_counter)
+        #     for i, est in enumerate(preds[-1]):
+        #         d_est_clipped = tf.clip_by_value(est["depth"], 1., max_d)
+        #         self.summaries.append(
+        #             [tf.summary.image, "depth_lvl_%i" % i,
+        #              tf.math.log(d_est_clipped) / tf.math.log(max_d)])
+        #         tf.summary.image("depth_lvl_%i" % i,
+        #                          tf.math.log(d_est_clipped) / tf.math.log(
+        #                              max_d),
+        #                          step=self.step_counter)
 
         with tf.name_scope("metrics"):
             gt = gts[-1]["depth"]
@@ -606,6 +641,9 @@ class M4Depth(ks.models.Model):
             self.compiled_metrics.update_state(gt, est)
             out_dict = {m.name: m.result() for m in self.metrics}
             out_dict["loss"] = loss
+
+            for k, v in out_dict.items():
+                tf.summary.scalar(k, data=v, step=self.step_counter)
 
         # Return a dict mapping metric names to current value.
         # Note that it will include the loss (tracked in self.metrics).
@@ -749,15 +787,16 @@ print()
 print()
 model = M4Depth(nbre_levels=n_lvl)
 now = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
-now = "small_data"
 tensorboard_cbk = ks.callbacks.TensorBoard(
     log_dir="log_dir/" + now, histogram_freq=0, write_graph=False,
     write_images=False, update_freq="batch",
     profile_batch=0, embeddings_freq=0, embeddings_metadata=None)
+
+now = "new_test"
 weights_dir = os.path.join("pretrained_weights/midair/", "train", now)
 model_checkpoint_cbk = CustomCheckpointCallback(weights_dir, resume_training=True)
 
-opt = tf.keras.optimizers.Adam(learning_rate=0.0001)
+opt = tf.keras.optimizers.Adam(learning_rate=0.00005)
 model.compile(optimizer=opt, metrics=[RootMeanSquaredLogError()])
 nbre_epochs = (220000 // chosen_dataloader.length)
 
