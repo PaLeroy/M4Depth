@@ -4,6 +4,7 @@ MidAir/
 /pretrained_weights/
 *.h5
 *.png
+log_dir/
 
 # Created by https://www.toptal.com/developers/gitignore/api/python,pycharm
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,pycharm
