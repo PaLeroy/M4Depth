@@ -15,7 +15,7 @@ case "$dataset" in
             savepath="pretrained_weights/midair"
         fi
         db_seq_len=""
-        data="data/midair/small_test_data"
+        data="data/midair/test_data"
         ;;
 
     "kitti")
@@ -73,4 +73,4 @@ case "$dataset" in
         ;;
 esac
 
-python main.py --mode=eval --dataset="$dataset" $db_seq_len --arch_depth=6 --ckpt_dir="$savepath" --records="$data"
+python main.py --mode=eval --dataset="$dataset" $db_seq_len --arch_depth=3 --ckpt_dir="$savepath" --records="$data"

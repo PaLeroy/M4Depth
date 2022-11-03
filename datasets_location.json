@@ -1,6 +1,6 @@
 {
   "_comment": "relative paths should be written relative to this file",
-  "midair" : "./datasets/MidAir",
+  "midair" : "/mnt/ssd2/midair/MidAir",
   "kitti-raw": "./datasets/Kitti",
   "tartanair": "./datasets/TartanAir"
 }

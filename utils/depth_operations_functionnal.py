@@ -502,8 +502,8 @@ def get_disparity_sweeping_cv(inp, search_range, nbre_cuts=1):
     c1 = tile_not_in_batch(c1, nbre_copies)
     combined_data = tile_not_in_batch(tf.concat([c2, disp_prev_t], axis=-1),
                                   nbre_copies)
-    #combined_data_w = dense_image_warp(combined_data, flow)
-    combined_data_w = combined_data
+    combined_data_w = dense_image_warp(combined_data, flow)
+    # combined_data_w = combined_data
     c2_w = combined_data_w[..., :-1]
     prev_disp = combined_data_w[..., -1]
     # Compute costs (operations performed in float16 for speedup)

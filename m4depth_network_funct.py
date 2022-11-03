@@ -1,28 +1,8 @@
-import sys
-from datetime import datetime
-
 import tensorflow as tf
-import numpy as np
 from tensorflow import keras as ks, float32
-from utils.depth_operations_functionnal import get_rot_mat, \
-    get_disparity_sweeping_cv, prev_d2disp, disp2depth, cost_volume, depth2disp
-from utils.depth_operations import reproject
-from dataloaders.midair import DataLoaderMidAir as MidAir
-from dataloaders import DataloaderParameters
-
-from importlib import reload
-import os
-
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-import tensorflow as tf
-from tensorflow import keras as ks
-from keras.utils import vis_utils
-from metrics import AbsRelError, SqRelError, RootMeanSquaredError, \
-    RootMeanSquaredLogError, ThresholdRelError
-
-from callbacks import CustomCheckpointCallback
-
-print(tf.__version__)
+from utils.depth_operations_functionnal import get_disparity_sweeping_cv, prev_d2disp, disp2depth, cost_volume, \
+    depth2disp
+from utils.depth_operations import reproject # We do not need the functionnal reproject
 
 
 class DomainNormalization(ks.layers.Layer):
@@ -129,12 +109,8 @@ def disp_refiner_as_a_function(regularizer_weight, name, feature_map):
 
         for j, (prev, conv) in enumerate(zip(prev_outs, convs)):
             prev_outs[j] = conv(prev)
-
-            if i < len(
-                    est_d_conv_layers) - 1:  # Don't activate last convolution output
-                prev_outs[j] = ks.layers.LeakyReLU(0.1,
-                                                   name=name + "_est_d_conv_layers_ReLu_" + str(
-                                                       i))(prev_outs[j])
+            if i < len(est_d_conv_layers) - 1:  # Don't activate last convolution output
+                prev_outs[j] = ks.layers.LeakyReLU(0.1, name=name + "_est_d_conv_layers_ReLu_" + str(i))(prev_outs[j])
     return prev_outs  # tf.concat(prev_outs, axis=-1)
 
 
@@ -483,8 +459,8 @@ class M4Depth(ks.models.Model):
             h = int(h/2)
             w = int(w/2)
             last_dim = self.all_filter_sizes[i]
-            dict_inputs["L_"+str(i+1)+"_f_enc_L_t1_init"] = tf.zeros((batch_size, h, w, last_dim))
-            dict_inputs["L_"+str(i+1)+"_d_est_L_t1_init"] = tf.ones((batch_size, h, w, 1))
+            dict_inputs["L_"+str(i+1)+"_f_enc_L_t1_init"] = tf.zeros((batch_size, h, w, last_dim), dtype=float32)
+            dict_inputs["L_"+str(i+1)+"_d_est_L_t1_init"] = tf.ones((batch_size, h, w, 1), dtype=float32)
 
         return dict_inputs
 
@@ -493,8 +469,8 @@ class M4Depth(ks.models.Model):
         # TODO: maybe possible to hardcode it in the network?
         h = int(self.h / (2 ** self.n_levels))
         w = int(self.w / (2 ** self.n_levels))
-        disp_L1_t_init = tf.ones((batch_size, h, w, 1))
-        other_L1_t_init = tf.zeros((batch_size, h, w, 4))
+        disp_L1_t_init = tf.ones((batch_size, h, w, 1), dtype=float32)
+        other_L1_t_init = tf.zeros((batch_size, h, w, 4), dtype=float32)
 
         return {"disp_L1_t_init":disp_L1_t_init,
                 "other_L1_t_init":other_L1_t_init}
@@ -513,7 +489,6 @@ class M4Depth(ks.models.Model):
         inputs_init_seq = self.inputs_init_seq(batch_size)
         inputs_recurrent = []
         for i in range(self.n_levels, 0, -1):
-            tf.print(i)
             key = "L_"+str(i)+"_f_enc_L_t1_init"
             inputs_recurrent.append(inputs_init_seq[key])
             key = "L_" + str(i) + "_d_est_L_t1_init"
@@ -575,9 +550,9 @@ class M4Depth(ks.models.Model):
                                                    sample["trans"],
                                                    data["camera"]["c"],
                                                    data["camera"]["f"])})
-                preds = model((traj_samples, data["camera"]))
+                preds = self((traj_samples, data["camera"]))
 
-                loss = model.m4depth_loss(gts, preds)
+                loss = self.m4depth_loss(gts, preds)
             count = tf.math.count_nonzero(tf.math.is_nan(loss))
             if count != 0:
                 tf.print("nan found loss")
@@ -618,31 +593,31 @@ class M4Depth(ks.models.Model):
 
             # Update metrics (includes the metric that tracks the loss)
 
-        # with tf.name_scope("summaries"):
-        #     max_d = 200.
-        #     gt_d_clipped = tf.clip_by_value(traj_samples[-1]['depth'], 1.,
-        #                                     max_d)
-        #     tf.summary.image("RGB_im", traj_samples[-1]['RGB_im'],
-        #                      step=self.step_counter)
-        #     im_reproj, _ = reproject(traj_samples[-2]['RGB_im'],
-        #                              traj_samples[-1]['depth'],
-        #                              traj_samples[-1]['rot'],
-        #                              traj_samples[-1]['trans'], data["camera"])
-        #     tf.summary.image("camera_prev_t_reproj", im_reproj,
-        #                      step=self.step_counter)
-        #
-        #     tf.summary.image("depth_gt",
-        #                      tf.math.log(gt_d_clipped) / tf.math.log(max_d),
-        #                      step=self.step_counter)
-        #     for i, est in enumerate(preds[-1]):
-        #         d_est_clipped = tf.clip_by_value(est["depth"], 1., max_d)
-        #         self.summaries.append(
-        #             [tf.summary.image, "depth_lvl_%i" % i,
-        #              tf.math.log(d_est_clipped) / tf.math.log(max_d)])
-        #         tf.summary.image("depth_lvl_%i" % i,
-        #                          tf.math.log(d_est_clipped) / tf.math.log(
-        #                              max_d),
-        #                          step=self.step_counter)
+        with tf.name_scope("summaries"):
+            max_d = 200.
+            gt_d_clipped = tf.clip_by_value(traj_samples[-1]['depth'], 1.,
+                                            max_d)
+            tf.summary.image("RGB_im", traj_samples[-1]['RGB_im'],
+                             step=self.step_counter)
+            im_reproj, _ = reproject(traj_samples[-2]['RGB_im'],
+                                     traj_samples[-1]['depth'],
+                                     traj_samples[-1]['rot'],
+                                     traj_samples[-1]['trans'], data["camera"])
+            tf.summary.image("camera_prev_t_reproj", im_reproj,
+                             step=self.step_counter)
+
+            tf.summary.image("depth_gt",
+                             tf.math.log(gt_d_clipped) / tf.math.log(max_d),
+                             step=self.step_counter)
+            for i, est in enumerate(preds[-1]):
+                d_est_clipped = tf.clip_by_value(est["depth"], 1., max_d)
+                self.summaries.append(
+                    [tf.summary.image, "depth_lvl_%i" % i,
+                     tf.math.log(d_est_clipped) / tf.math.log(max_d)])
+                tf.summary.image("depth_lvl_%i" % i,
+                                 tf.math.log(d_est_clipped) / tf.math.log(
+                                     max_d),
+                                 step=self.step_counter)
 
         with tf.name_scope("metrics"):
             gt = gts[-1]["depth"]
@@ -777,69 +752,3 @@ class M4Depth(ks.models.Model):
         )
 
 
-if __name__ == '__main__':
-
-    param = DataloaderParameters({
-    '_comment': '/Users/pascalleroy/Documents/m4depth/M4Depth/relative paths should be written relative to this file',
-    'midair': '/mnt/ssd2/midair/MidAir',
-    'kitti-raw': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/Kitti',
-    'tartanair': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/TartanAir'},
-    'data/midair/train_data',
-        8,  # db_seq_len
-        4,  # seq_len
-        True)
-
-    batch_size = 2
-    n_lvl = 3
-    chosen_dataloader = MidAir()
-    chosen_dataloader.get_dataset("train", param, batch_size=batch_size)
-    data = chosen_dataloader.dataset
-
-
-
-
-    print("-------------")
-    print()
-    print()
-    model = M4Depth(n_levels=n_lvl)
-    now = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
-    tensorboard_cbk = ks.callbacks.TensorBoard(
-        log_dir="log_dir/" + now, histogram_freq=0, write_graph=False,
-        write_images=False, update_freq="batch",
-        profile_batch=0, embeddings_freq=0, embeddings_metadata=None)
-
-    now = "new_test"
-    weights_dir = os.path.join("pretrained_weights/midair/", "train", now)
-    model_checkpoint_cbk = CustomCheckpointCallback(weights_dir, resume_training=True)
-
-    opt = tf.keras.optimizers.Adam(learning_rate=0.00005)
-    model.compile(optimizer=opt, metrics=[RootMeanSquaredLogError()])
-    nbre_epochs = (220000 // chosen_dataloader.length)
-
-    model.fit(data, epochs=nbre_epochs, callbacks=[tensorboard_cbk, model_checkpoint_cbk])
-
-
-    # for idx_data, data in enumerate(data):
-    #     print("batch", idx_data)
-    #     # iterate over dataset
-    #     seq_len = data["depth"].get_shape().as_list()[1]
-    #     traj_samples = [{} for i in range(seq_len)]
-    #     attribute_list = ["depth", "RGB_im", "new_traj", "rot", "trans"]
-    #     for key in attribute_list:
-    #         value_list = tf.unstack(data[key], axis=1)
-    #         for i, item in enumerate(value_list):
-    #             shape = item.get_shape()
-    #             traj_samples[i][key] = item
-    #     gts = []
-    #     for sample in traj_samples:
-    #         gts.append({"depth": sample["depth"],
-    #                     "disp": depth2disp(sample["depth"],
-    #                                        sample["rot"],
-    #                                        sample["trans"],
-    #                                        data["camera"]["c"],
-    #                                        data["camera"]["f"])})
-    #     preds = model((traj_samples, data["camera"]))
-    #
-    #     loss = model.m4depth_loss(gts, preds)
-    #     print("loss: ", loss)
-    #     tf.print("loss: ", loss)

@@ -245,7 +245,9 @@ class DepthEstimatorLevel(ks.layers.Layer):
 
                 # tf.print(self.lvl_depth, "f_input", f_input.shape)
                 with tf.name_scope("depth_estimator"):
+                    print(" self.disp_refiner(f_input)", f_input)
                     prev_out = self.disp_refiner(f_input)
+                    print(" prev_out ____ self.disp_refiner(f_input)", prev_out)
 
                     disp = prev_out[0][:, :, :, :1]
                     other = prev_out[0][:, :, :, 1:]
@@ -541,7 +543,6 @@ class M4Depth(ks.models.Model):
                     tf.print(pred_depth.shape)
                     print(pred_depth.shape)
 
-                exit()
                 for i, pred in enumerate(pred_pyr):  # Iterate over the outputs produced by the different levels
                     pred_depth = preprocess(pred["depth"])
                     tf.print(pred_depth.shape)

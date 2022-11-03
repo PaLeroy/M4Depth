@@ -91,8 +91,13 @@ class CustomCheckpointCallback(ks.callbacks.TerminateOnNaN):
 
     def on_batch_end(self, batch, logs=None):
         super(CustomCheckpointCallback, self).on_batch_end(batch, logs=logs)
+
         if self.model.stop_training:
             self.is_nan_stop = True
+        else:
+            self.model.save_weights(os.path.join(self.savedir, "batch_latest_ckpt.h5"))
+            checkpoint_path = os.path.join(self.train_dir, "batch_latest_ckpt.ckpt")
+            self.model.save_weights(checkpoint_path)
 
     def on_train_begin(self, logs=None):
         self.checkpoint = tf.train.Checkpoint(self.model)

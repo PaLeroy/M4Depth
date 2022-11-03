@@ -27,7 +27,7 @@ chosen_dataloader = MidAir()
 chosen_dataloader.get_dataset("eval", param, batch_size=1)
 data = chosen_dataloader.dataset
 
-model = M4Depth(nbre_levels=2)
+model = M4Depth(nbre_levels=6)
 
 weights_dir = os.path.join("pretrained_weights/midair/", "best")
 model_checkpoint_cbk = CustomCheckpointCallback(weights_dir,
