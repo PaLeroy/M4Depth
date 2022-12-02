@@ -1,8 +1,13 @@
 import tensorflow as tf
 from tensorflow import keras as ks, float32
-from utils.depth_operations_functionnal import get_disparity_sweeping_cv, prev_d2disp, disp2depth, cost_volume, \
-    depth2disp
-from utils.depth_operations import reproject # We do not need the functionnal reproject
+
+from metrics import RootMeanSquaredLogError
+from utils.depth_operations_functionnal import get_disparity_sweeping_cv, \
+    prev_d2disp, disp2depth, cost_volume, \
+    depth2disp, lambda_disp2depth, lambda_prev_d2disp, \
+    lambda_get_disparity_sweeping_cv, lambda_cost_volume
+from utils.depth_operations import \
+    reproject  # We do not need the functionnal reproject
 
 
 class DomainNormalization(ks.layers.Layer):
@@ -63,6 +68,7 @@ def domain_normalization_as_a_function(f_map, regularizer_weight):
         (normed)
     return to_ret
 
+
 @tf.function
 def log_tensor_companion(x):
     count = tf.math.count_nonzero(tf.math.is_nan(x[0]))
@@ -93,15 +99,15 @@ def disp_refiner_as_a_function(regularizer_weight, name, feature_map):
         for i, nbre_filters in enumerate(conv_channels)
     ]
     prev_out = tf.identity(feature_map)
-    prev_out = log_tensor(prev_out, "prev_out_before")
+    # prev_out = log_tensor(prev_out, "prev_out_before")
     for i, conv in enumerate(prep_conv_layers):
-        prev_out = log_tensor(prev_out, name + "just before before prev_out_before conv" + str(i))
+        # prev_out = log_tensor(prev_out, name + "just before before prev_out_before conv" + str(i))
         prev_out = conv(prev_out)
-        prev_out = log_tensor(prev_out, name + "prev_out_before conv" + str(i))
+        # prev_out = log_tensor(prev_out, name + "prev_out_before conv" + str(i))
         prev_out = ks.layers.LeakyReLU(0.1,
                                        name=name + "_prep_conv_layers_ReLu_" + str(
                                            i))(prev_out)
-        prev_out = log_tensor(prev_out, "prev_out_before leaky" + str(i))
+        # prev_out = log_tensor(prev_out, "prev_out_before leaky" + str(i))
 
     prev_outs = [prev_out, prev_out]
 
@@ -109,12 +115,16 @@ def disp_refiner_as_a_function(regularizer_weight, name, feature_map):
 
         for j, (prev, conv) in enumerate(zip(prev_outs, convs)):
             prev_outs[j] = conv(prev)
-            if i < len(est_d_conv_layers) - 1:  # Don't activate last convolution output
-                prev_outs[j] = ks.layers.LeakyReLU(0.1, name=name + "_est_d_conv_layers_ReLu_" + str(i))(prev_outs[j])
+            if i < len(
+                    est_d_conv_layers) - 1:  # Don't activate last convolution output
+                prev_outs[j] = ks.layers.LeakyReLU(0.1,
+                                                   name=name + "_est_d_conv_layers_ReLu_" + str(
+                                                       i))(prev_outs[j])
     return prev_outs  # tf.concat(prev_outs, axis=-1)
 
 
-def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
+def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004,
+                              old_version=True):
     """
     Functionnal version of M4Depth
     """
@@ -178,9 +188,8 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
             name=layer_string + "_Encoder_s2")(x)
         x = ks.layers.LeakyReLU(0.1, name=layer_string + "_f_enc_L_t")(
             conv_layers_s2_output)
-        x = log_tensor(x, layer_string + "_f_enc_L_t")
+        # x = log_tensor(x, layer_string + "_f_enc_L_t")
         encoder_output_list_per_level.append(x)
-
 
     all_output_list = []
 
@@ -279,22 +288,26 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         # name=layer_string+ "_normalise_cuts")(f_enc_L_t)
         f_enc_L_t = tf.math.l2_normalize(f_enc_L_t, axis=-1,
                                          name=layer_string + "_normalise_cuts")
-        f_enc_L_t = log_tensor(f_enc_L_t, layer_string + 'f_enc_L_t l2_normalize')
+        # f_enc_L_t = log_tensor(f_enc_L_t, layer_string + 'f_enc_L_t l2_normalize')
         f_enc_L_t = ks.layers.Reshape((h, w, -1,),
                                       name=layer_string + "_concat_cuts")(
             f_enc_L_t)
-        f_enc_L_t = log_tensor(f_enc_L_t, layer_string + 'f_enc_L_t')
+        # f_enc_L_t = log_tensor(f_enc_L_t, layer_string + 'f_enc_L_t')
 
-        depth_L_t1 = log_tensor(depth_L_t1, layer_string + ' depth_L_t1')
-        prev_d2disp_function = \
-            lambda inp: prev_d2disp(inp[0], inp[1], inp[2], inp[3], inp[4])
-        prev_d2disp_layer = ks.layers.Lambda(prev_d2disp_function,
-                                             name=layer_string
-                                                  + "_prev_d2disp")
-        disp_L_t1 = prev_d2disp_layer((depth_L_t1, local_rot, local_trans,
-                                       local_camera_c, local_camera_f))
+        # depth_L_t1 = log_tensor(depth_L_t1, layer_string + ' depth_L_t1')
+        if old_version:
+            prev_d2disp_function = \
+                lambda inp: lambda_prev_d2disp(inp[0], inp[1], inp[2], inp[3], inp[4])
+            prev_d2disp_layer = ks.layers.Lambda(prev_d2disp_function,
+                                                 name=layer_string
+                                                      + "_prev_d2disp")
+            disp_L_t1 = prev_d2disp_layer((depth_L_t1, local_rot, local_trans,
+                                           local_camera_c, local_camera_f))
+        else:
+            disp_L_t1 = prev_d2disp(depth_L_t1, local_rot, local_trans,
+                                           local_camera_c, local_camera_f)
 
-        disp_L_t1 = log_tensor(disp_L_t1, layer_string + ' disp_L_t1')
+        # disp_L_t1 = log_tensor(disp_L_t1, layer_string + ' disp_L_t1')
         # disp_L_t1 = prev_d2disp(depth_L_t1, local_rot,
         #                         local_trans, local_camera_c, local_camera_f)
 
@@ -302,27 +315,37 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         #         inp: get_disparity_sweeping_cv(inp[0], inp[1], inp[2], inp[3],
         #                                        inp[4], inp[5], inp[6], inp[7])
         # TODO: nbre_cut must be a tensor part of the input?
-        get_disparity_sweeping_cv_layer = tf.keras.layers.Lambda(
-            get_disparity_sweeping_cv,
-            arguments={"search_range": 4, "nbre_cuts": nbre_cuts},
-            name=layer_string + "_get_disparity_sweeping_cv")
-        cv, disp_prev_t_reproj = \
-            get_disparity_sweeping_cv_layer((f_enc_L_t, f_enc_L_t1, disp_L_t1,
-                                             disp_L1_t, local_rot, local_trans,
-                                             local_camera_c, local_camera_f,))
-        cv = log_tensor(cv, layer_string + 'cv')
+        if old_version:
+            get_disparity_sweeping_cv_layer = tf.keras.layers.Lambda(
+                lambda_get_disparity_sweeping_cv,
+                arguments={"search_range": 4, "nbre_cuts": nbre_cuts},
+                name=layer_string + "_get_disparity_sweeping_cv")
+            cv, disp_prev_t_reproj = \
+                get_disparity_sweeping_cv_layer((f_enc_L_t, f_enc_L_t1, disp_L_t1,
+                                                 disp_L1_t, local_rot, local_trans,
+                                                 local_camera_c, local_camera_f,))
+        else:
+            cv, disp_prev_t_reproj = get_disparity_sweeping_cv(
+                    (f_enc_L_t, f_enc_L_t1, disp_L_t1,
+                     disp_L1_t, local_rot, local_trans,
+                     local_camera_c, local_camera_f),
+                search_range= 4,
+                nbre_cuts=nbre_cuts)
+        # cv = log_tensor(cv, layer_string + 'cv')
         # cv, disp_prev_t_reproj = \
         #     get_disparity_sweeping_cv(f_enc_L_t, f_enc_L_t1, disp_L_t1,
         #                               disp_L1_t, local_rot, local_trans,
         #                               local_camera_c, local_camera_f,
         #                               4, nbre_cuts)
-
-        autocorr = ks.layers.Lambda(cost_volume,
-                                    arguments={"search_range": 3,
-                                               "nbre_cuts": nbre_cuts},
-                                    name=layer_string + "_autocorr_function") \
-            (f_enc_L_t)
-        autocorr = log_tensor(autocorr, layer_string + 'autocorr')
+        if old_version:
+            autocorr = ks.layers.Lambda(lambda_cost_volume,
+                                        arguments={"search_range": 3,
+                                                   "nbre_cuts": nbre_cuts},
+                                        name=layer_string + "_autocorr_function") \
+                (f_enc_L_t)
+        else:
+            autocorr = cost_volume(f_enc_L_t, search_range=3, nbre_cuts=nbre_cuts)
+        # autocorr = log_tensor(autocorr, layer_string + 'autocorr')
 
         # autocorr = cost_volume(f_enc_L_t, f_enc_L_t, 3,
         # nbre_cuts=nbre_cuts, name=layer_string+"_autocorr_function")
@@ -337,13 +360,13 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         disp_prev_t_reproj = tf.math.log(
             disp_prev_t_reproj[:, :, :, 4:5] * 2 ** lvl_mul,
             name=layer_string + "disp_prev_t_reproj_log_function")
-        disp_prev_t_reproj = log_tensor(disp_prev_t_reproj, layer_string + 'disp_prev_t_reproj')
+        # disp_prev_t_reproj = log_tensor(disp_prev_t_reproj, layer_string + 'disp_prev_t_reproj')
         # disp_L1_t_log_function = lambda x: tf.math.log(x*2**lvl_mul)
         # disp_L1_t = ks.layers.Lambda(disp_L1_t_log_function,
         # name=layer_string+"_disp_L-1_t_log_function")(disp_L1_t)
         disp_L1_t = tf.math.log(disp_L1_t * 2 ** lvl_mul,
                                 name=layer_string + "_disp_L-1_t_log_function")
-        disp_L1_t = log_tensor(disp_L1_t, layer_string + 'disp_L1_t')
+        # disp_L1_t = log_tensor(disp_L1_t, layer_string + 'disp_L1_t')
 
         f_input = \
             ks.layers.Concatenate(
@@ -366,16 +389,15 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
                 name=layer_string + "_Concatenate_disp_prev_t_reproj")(
                 [f_input, disp_prev_t_reproj])
 
-        f_input = log_tensor(f_input,layer_string +  'f_input')
+        # f_input = log_tensor(f_input,layer_string +  'f_input')
         prev_out = disp_refiner_as_a_function(
             regularizer_weight=regularizer_weight,
             name=layer_string + "_disp_refiner", feature_map=f_input)
 
-
         # slicing_disp_function = lambda x: x[0][:, :, :, :1]
         # disp = ks.layers.Lambda(slicing_disp_function,
         # name=layer_string + "_slicing_disp_function")(prev_out)
-        disp= prev_out[0][:, :, :, :1]
+        disp = prev_out[0][:, :, :, :1]
         # slicing_other_function = lambda x: x[0][:, :, :, 1:]
         # other = ks.layers.Lambda(slicing_other_function,
         # name=layer_string + "_slicing_other_function")(prev_out)
@@ -387,38 +409,39 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         disp_curr_l = \
             tf.exp(tf.clip_by_value(disp, -7., 7.)) / 2 ** lvl_mul
 
-        disp2depth_function = \
-            lambda x: disp2depth(x[0], x[1], x[2], x[3], x[4])
-
-        disp2depth_function_layer = ks.layers.Lambda(disp2depth_function,
-                                                     name=layer_string + "_depth_curr_l_disp2depth_function")
-        depth_curr_l = disp2depth_function_layer((disp_curr_l, local_rot,
-                                                  local_trans,
-                                                  local_camera_c,
-                                                  local_camera_f))
+        if old_version:
+            disp2depth_function = \
+                lambda x: lambda_disp2depth(x[0], x[1], x[2], x[3], x[4])
+            disp2depth_function_layer = ks.layers.Lambda(disp2depth_function,
+                                                         name=layer_string + "_depth_curr_l_disp2depth_function")
+            depth_curr_l = disp2depth_function_layer(
+                (disp_curr_l, local_rot, local_trans,
+                 local_camera_c, local_camera_f))
+        else:
+            depth_curr_l = disp2depth(disp_curr_l, local_rot, local_trans,
+                                      local_camera_c, local_camera_f)
 
         # These layers have no effect on value directly
         # but allow to isolate and rename variables
         other_output = ks.layers.Layer(
-                name=layer_string + "_other_identity") \
+            name=layer_string + "_other_identity") \
             (tf.identity(other))
         depth_output = ks.layers.Layer(
-                name=layer_string + "_depth_identity") \
+            name=layer_string + "_depth_identity") \
             (tf.identity(depth_curr_l))
         disp_output = ks.layers.Layer(
-                name=layer_string + "_disp_identity") \
+            name=layer_string + "_disp_identity") \
             (tf.identity(disp_curr_l))
 
-        other_output = log_tensor(other_output, layer_string + 'other_output')
-        depth_output = log_tensor(depth_output, layer_string + 'depth_output')
-        disp_output = log_tensor(disp_output, layer_string + 'disp_output')
-        
+        # other_output = log_tensor(other_output, layer_string + 'other_output')
+        # depth_output = log_tensor(depth_output, layer_string + 'depth_output')
+        # disp_output = log_tensor(disp_output, layer_string + 'disp_output')
+
         curr_l_est = {
             layer_string + "_other": other_output,
             layer_string + "_depth": depth_output,
             layer_string + "_disp": disp_output
         }
-
 
         d_est_all_levels.append(curr_l_est)
 
@@ -427,18 +450,21 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         for k, v in i.items():
             all_output_list.append(v)
 
-    return ks.Model(inputs=inputs_list, outputs=encoder_output_list_per_level+all_output_list), all_filter_sizes
+    return ks.Model(inputs=inputs_list,
+                    outputs=encoder_output_list_per_level + all_output_list), all_filter_sizes
 
 
 class M4Depth(ks.models.Model):
     """Tensorflow model of M4Depth"""
 
-    def __init__(self, n_levels=6, regularizer_weight=0.):
+    def __init__(self, n_levels=6, regularizer_weight=0., old_version=True):
         super(M4Depth, self).__init__()
         regularizer_weight = 0.
 
-        self.full_model, self.all_filter_sizes = M4Depth_functionnal_model(n_levels,
-                                                    regularizer_weight=regularizer_weight)
+        self.full_model, self.all_filter_sizes = M4Depth_functionnal_model(
+            n_levels,
+            regularizer_weight=regularizer_weight,
+            old_version=old_version)
         self.n_levels = n_levels
         self.h = 384
         self.w = 384
@@ -456,11 +482,13 @@ class M4Depth(ks.models.Model):
         h = self.h
         w = self.w
         for i in range(self.n_levels):
-            h = int(h/2)
-            w = int(w/2)
+            h = int(h / 2)
+            w = int(w / 2)
             last_dim = self.all_filter_sizes[i]
-            dict_inputs["L_"+str(i+1)+"_f_enc_L_t1_init"] = tf.zeros((batch_size, h, w, last_dim), dtype=float32)
-            dict_inputs["L_"+str(i+1)+"_d_est_L_t1_init"] = tf.ones((batch_size, h, w, 1), dtype=float32)
+            dict_inputs["L_" + str(i + 1) + "_f_enc_L_t1_init"] = tf.zeros(
+                (batch_size, h, w, last_dim), dtype=float32)
+            dict_inputs["L_" + str(i + 1) + "_d_est_L_t1_init"] = tf.ones(
+                (batch_size, h, w, 1), dtype=float32)
 
         return dict_inputs
 
@@ -472,8 +500,9 @@ class M4Depth(ks.models.Model):
         disp_L1_t_init = tf.ones((batch_size, h, w, 1), dtype=float32)
         other_L1_t_init = tf.zeros((batch_size, h, w, 4), dtype=float32)
 
-        return {"disp_L1_t_init":disp_L1_t_init,
-                "other_L1_t_init":other_L1_t_init}
+        return {"disp_L1_t_init": disp_L1_t_init,
+                "other_L1_t_init": other_L1_t_init}
+
     @tf.function
     def call(self, data):
         self.step_counter.assign_add(1)
@@ -489,7 +518,7 @@ class M4Depth(ks.models.Model):
         inputs_init_seq = self.inputs_init_seq(batch_size)
         inputs_recurrent = []
         for i in range(self.n_levels, 0, -1):
-            key = "L_"+str(i)+"_f_enc_L_t1_init"
+            key = "L_" + str(i) + "_f_enc_L_t1_init"
             inputs_recurrent.append(inputs_init_seq[key])
             key = "L_" + str(i) + "_d_est_L_t1_init"
             inputs_recurrent.append(inputs_init_seq[key])
@@ -522,13 +551,13 @@ class M4Depth(ks.models.Model):
                 j = i * 3 + 1
                 # outputs[n+i*3] is other, outputs_[n+i*3+2] is disp
                 # outputs[n+i*3+1] is L_(i+1)_d_est_L_t1
-                inputs_recurrent[i * 2 + 1] = outputs[self.n_levels+j]
-                list_depth.append({"depth": outputs[self.n_levels+j]})
+                inputs_recurrent[i * 2 + 1] = outputs[self.n_levels + j]
+                list_depth.append({"depth": outputs[self.n_levels + j]})
 
             depths.append(list_depth)
 
         return depths
-    
+
     @tf.function
     def train_step(self, data):
         with tf.name_scope("train_scope"):
@@ -563,33 +592,46 @@ class M4Depth(ks.models.Model):
             # Update weights
             self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-
-
-
-            for weights, grads in zip(self.full_model.trainable_weights, gradients):
+            for weights, grads in zip(self.full_model.trainable_weights,
+                                      gradients):
                 count = tf.math.count_nonzero(tf.math.is_nan(grads))
                 if count != 0:
-                    tf.print("nan found gradients", weights.name.replace(':', '_') + '_grads')
+                    tf.print("nan found gradients",
+                             weights.name.replace(':', '_') + '_grads')
 
                 count = tf.math.count_nonzero(tf.math.is_nan(weights))
                 if count != 0:
-                    tf.print("nan found weights", weights.name.replace(':', '_') + '_weights')
+                    tf.print("nan found weights",
+                             weights.name.replace(':', '_') + '_weights')
 
-                tf.summary.histogram(weights.name.replace(':', '_') + '_grads', data=grads, step=self.step_counter)
-                abs_grad=tf.abs(grads)
-                tf.summary.scalar(weights.name.replace(':', '_') + '_grads_mean', data=tf.reduce_mean(abs_grad), step=self.step_counter)
-                tf.summary.scalar(weights.name.replace(':', '_') + '_grads_min', data=tf.reduce_min(abs_grad), step=self.step_counter)
-                tf.summary.scalar(weights.name.replace(':', '_') + '_grads_max', data=tf.reduce_max(abs_grad), step=self.step_counter)
+                tf.summary.histogram(weights.name.replace(':', '_') + '_grads',
+                                     data=grads, step=self.step_counter)
+                abs_grad = tf.abs(grads)
+                tf.summary.scalar(
+                    weights.name.replace(':', '_') + '_grads_mean',
+                    data=tf.reduce_mean(abs_grad), step=self.step_counter)
+                tf.summary.scalar(
+                    weights.name.replace(':', '_') + '_grads_min',
+                    data=tf.reduce_min(abs_grad), step=self.step_counter)
+                tf.summary.scalar(
+                    weights.name.replace(':', '_') + '_grads_max',
+                    data=tf.reduce_max(abs_grad), step=self.step_counter)
 
-                tf.summary.histogram(weights.name.replace(':', '_') + '_weights', data=weights, step=self.step_counter)
-                tf.summary.scalar(weights.name.replace(':', '_') + '_weights_mean', data=tf.reduce_mean(weights),
-                                  step=self.step_counter)
-                tf.summary.scalar(weights.name.replace(':', '_') + '_weights_min', data=tf.reduce_min(weights),
-                                  step=self.step_counter)
-                tf.summary.scalar(weights.name.replace(':', '_') + '_weights_max', data=tf.reduce_max(weights),
-                                  step=self.step_counter)
-
-
+                tf.summary.histogram(
+                    weights.name.replace(':', '_') + '_weights', data=weights,
+                    step=self.step_counter)
+                tf.summary.scalar(
+                    weights.name.replace(':', '_') + '_weights_mean',
+                    data=tf.reduce_mean(weights),
+                    step=self.step_counter)
+                tf.summary.scalar(
+                    weights.name.replace(':', '_') + '_weights_min',
+                    data=tf.reduce_min(weights),
+                    step=self.step_counter)
+                tf.summary.scalar(
+                    weights.name.replace(':', '_') + '_weights_max',
+                    data=tf.reduce_max(weights),
+                    step=self.step_counter)
 
             # Update metrics (includes the metric that tracks the loss)
 
@@ -724,12 +766,13 @@ class M4Depth(ks.models.Model):
                 for i, pred in enumerate(
                         pred_pyr):  # Iterate over the outputs produced by the different levels
 
-                    count = tf.math.count_nonzero(tf.math.is_nan(pred["depth"]))
+                    count = tf.math.count_nonzero(
+                        tf.math.is_nan(pred["depth"]))
                     if count != 0:
-                        tf.print("error before preprocess pred[depth]", i, count)
+                        tf.print("error before preprocess pred[depth]", i,
+                                 count)
 
                     pred_depth = preprocess(pred["depth"])
-
 
                     # Compute loss term
                     b, h, w = pred_depth.get_shape().as_list()[:3]
@@ -752,3 +795,6 @@ class M4Depth(ks.models.Model):
         )
 
 
+if __name__ == '__main__':
+    model = M4Depth(n_levels=6, old_version=False)
+    model.save_h5("test.h5")

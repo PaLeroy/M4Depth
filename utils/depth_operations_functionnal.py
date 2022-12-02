@@ -73,10 +73,17 @@ def get_rot_mat(rot):
             'Rotation must be expressed as a small angle (x,y,z) or a quaternion (w,x,y,z)')
 
 @tf.function
-def repeat_const(tensor, myconst):
+def repeat_ones(tensor):
+    myconst = tf.convert_to_tensor(np.ones((1, 1)).astype('float32'))
     shapes = tf.shape(tensor)
     return tf.repeat(myconst, shapes[0], axis=0)
 
+
+
+@tf.function
+def repeat_const(tensor, myconst):
+    shapes = tf.shape(tensor)
+    return tf.repeat(myconst, shapes[0], axis=0)
 
 @tf.function
 def get_coords_2d(map, camera_c, camera_f):
@@ -202,7 +209,7 @@ def recompute_depth(depth, rot, trans, camera, mesh=None):
         return tf.clip_by_value(new_depth, 0.1, 2000.)
 
 @tf.function
-def disp2depth(disp, rot, trans, camera_c, camera_f):
+def lambda_disp2depth(disp, rot, trans, camera_c, camera_f):
     """ Converts a disparity map into a depth map according to given camera motion and specifications """
     b, h, w = disp.shape[0:3]
     coords2d, _ = get_coords_2d(disp, camera_c, camera_f)
@@ -221,6 +228,48 @@ def disp2depth(disp, rot, trans, camera_c, camera_f):
     t = ks.layers.Reshape((1, 3, 1,), )(trans)
     myconst = tf.convert_to_tensor(np.ones((1, 1)).astype('float32'))
     ones_ = tf.keras.layers.Lambda(lambda x: repeat_const(x, myconst))(camera_f)
+    f_vec = ks.layers.Concatenate(axis=1)([camera_f, ones_])
+    f_vec =  ks.layers.Reshape((1, 3, 1,),)(f_vec)
+
+    rot_coords = rot_mat @ coords2d
+    alpha = rot_coords[:, :, -1:, :]
+    proj_coords = rot_coords * f_vec / alpha
+    scaled_t = t * f_vec
+
+    delta_x = scaled_t[:, :, 0, 0] - scaled_t[:, :, 2, 0] * proj_coords[:,
+                                                            :, 0, 0]
+    delta_y = scaled_t[:, :, 1, 0] - scaled_t[:, :, 2, 0] * proj_coords[:,
+                                                            :, 1, 0]
+
+    sqrt_value = tf.sqrt(delta_x ** 2 + delta_y ** 2)
+    sqrt_value = ks.layers.Reshape((h * w, 1, 1,), )(sqrt_value)
+
+
+    depth = (sqrt_value / disp - scaled_t[:, :, -1:, :]) / alpha
+    depth = ks.layers.Reshape((h, w, 1,), )(depth)
+
+    return depth
+
+
+def disp2depth(disp, rot, trans, camera_c, camera_f):
+    """ Converts a disparity map into a depth map according to given camera motion and specifications """
+    b, h, w = disp.shape[0:3]
+    get_coords_2d_lambda = lambda x: get_coords_2d(x[0], x[1], x[2])
+    coords2d, _ = ks.layers.Lambda(get_coords_2d_lambda)((disp, camera_c, camera_f))
+    disp = ks.layers.Reshape((h * w, 1, 1,), )(disp)
+
+    max_function = lambda x: tf.maximum(x, 1e-5)
+    disp = ks.layers.Lambda(max_function)(disp)
+
+    coords2d = ks.layers.Reshape((h * w, 3, 1,), )(coords2d)
+    rot_mat = get_rot_mat(rot)
+    # rot_mat = tf.expand_dims(rot_mat, axis=1)
+    # expand_function = lambda x : tf.expand_dims(x, axis=1)
+    # rot_mat = ks.layers.Lambda(expand_function)(rot_mat)
+    rot_mat = ks.layers.Reshape((1, rot_mat.shape[1], rot_mat.shape[2],), )(rot_mat)
+    t = ks.layers.Reshape((1, 3, 1,), )(trans)
+
+    ones_ = tf.keras.layers.Lambda(lambda x: repeat_ones(x))(camera_f)
     f_vec = ks.layers.Concatenate(axis=1)([camera_f, ones_])
     f_vec =  ks.layers.Reshape((1, 3, 1,),)(f_vec)
 
@@ -348,8 +397,33 @@ def depth2disp_former(depth, rot, trans, camera):
 
         return tf.reshape(disp, [b, h, w, 1])
 
-@tf.function
 def prev_d2disp(prev_d, rot, trans, camera_c, camera_f):
+    """ Converts depth map corresponding to previous time step into the disparity map corresponding to current time step """
+    b, h, w = prev_d.get_shape().as_list()[0:3]
+
+    get_coords_2d_lambda = lambda x: get_coords_2d(x[0], x[1], x[2])
+    coords2d, _ = ks.layers.Lambda(get_coords_2d_lambda)((prev_d, camera_c, camera_f))
+    prev_d = ks.layers.Reshape([h * w, 1, 1, ],)(prev_d)
+    coords2d = ks.layers.Reshape([h * w, 3, 1, ], )(coords2d)
+
+    t = ks.layers.Reshape([1, 3, 1, ],)(trans)
+    ones_ = tf.keras.layers.Lambda(lambda x: repeat_ones(x))(camera_f)
+    f_vec = ks.layers.Concatenate(axis=1)([camera_f, ones_])
+    f_vec = ks.layers.Reshape((1, 3, 1,),)(f_vec)
+
+    coords2d = coords2d * f_vec
+    scaled_t = t * f_vec
+
+    # delta = (scaled_t - t[:, :, -1:, :] * coords2d) / (
+    #             prev_d - t[:, :, -1:, :])
+    delta = tf.math.divide_no_nan(scaled_t - t[:, :, -1:, :] * coords2d, prev_d - t[:, :, -1:, :])
+    disp = tf.norm(delta[:, :, :2, :], axis=2)
+    disp = ks.layers.Reshape([h, w, 1,], )(disp)
+    disp = tf.stop_gradient(disp)
+    return disp
+
+@tf.function
+def lambda_prev_d2disp(prev_d, rot, trans, camera_c, camera_f):
     """ Converts depth map corresponding to previous time step into the disparity map corresponding to current time step """
     b, h, w = prev_d.get_shape().as_list()[0:3]
     count = tf.math.count_nonzero(tf.math.is_nan(prev_d))
@@ -450,8 +524,76 @@ def tile_not_in_batch(map, nbre_copies):
 
     return map
 
-@tf.function
 def get_disparity_sweeping_cv(inp, search_range, nbre_cuts=1):
+    """ Computes the DSCV as presented in the paper """
+    c1, c2, disp_prev_t, disp, rot, trans, camera_c,  camera_f \
+        = inp[0], inp[1], inp[2], inp[3], inp[4], inp[5], inp[6], inp[7]
+
+    # Prepare inputs
+    nbre_copies = 2 * search_range + 1
+    range_before_reshape = tf.range(-search_range, search_range + 1, 1.0, dtype=tf.float32)
+    expl_range = tf.reshape(range_before_reshape , [1, -1, 1, 1, 1])
+    b, h, w = c1.get_shape().as_list()[0:3]
+
+    disp = tile_not_in_batch(disp, nbre_copies)
+    disp = tf.reshape(disp, [-1, nbre_copies, w, h, 1])
+
+    disp = disp + expl_range
+    disp = tf.clip_by_value(disp, 1e-6, 1e6)
+    # Compute disp independent factors
+    get_coords_2d_lambda = lambda x: get_coords_2d(x[0], x[1], x[2])
+    coords2d, _ = ks.layers.Lambda(get_coords_2d_lambda)((c1, camera_c, camera_f))
+    coords2d = ks.layers.Reshape([h * w, 3, 1, ], )(coords2d)
+    # rot_mat = tf.expand_dims(get_rot_mat(rot), axis=1)
+    rot_mat = get_rot_mat(rot)
+    rot_mat = ks.layers.Reshape((1, rot_mat.shape[1], rot_mat.shape[2],), )(rot_mat)
+    t = ks.layers.Reshape((1, 3, 1, ), )(trans)
+
+    ones_ = tf.keras.layers.Lambda(lambda x: repeat_ones(x))(camera_f)
+    f_vec = ks.layers.Concatenate(axis=1)([camera_f, ones_])
+    f_vec =  ks.layers.Reshape((1, 3, 1,),)(f_vec)
+    rot_coords = rot_mat @ coords2d
+    alpha = rot_coords[:, :, -1:, :]
+    proj_coords = rot_coords * f_vec / alpha
+    scaled_t = t * f_vec
+    delta_x = scaled_t[:, :, 0, 0] - scaled_t[:, :, 2, 0] * proj_coords[:,
+                                                            :, 0, 0]
+    delta_y = scaled_t[:, :, 1, 0] - scaled_t[:, :, 2, 0] * proj_coords[:,
+                                                            :, 1, 0]
+    delta_x = ks.layers.Reshape([1, h, w, 1,],)(delta_x)
+    delta_y = ks.layers.Reshape([1, h, w, 1,],)(delta_y)
+
+    start_coords = ks.layers.Reshape([ 1, h, w, 2,],)(coords2d[:, :, :2, :] * f_vec[:, :, :2, :])
+    proj_coords = ks.layers.Reshape([1, h, w, 2,],)(proj_coords[:, :, :2, :])
+
+    # disp to flow
+    sqrt_value = tf.sqrt(delta_x ** 2 + delta_y ** 2)
+    divider = sqrt_value / disp  # is correct computation after simplification
+    delta = tf.concat([delta_x / divider, delta_y / divider], axis=-1)
+    flow = proj_coords + delta - start_coords
+    flow = tf.reverse(flow, axis=[-1])
+    c1 = tile_not_in_batch(c1, nbre_copies)
+    combined_data = tile_not_in_batch(tf.concat([c2, disp_prev_t], axis=-1),
+                                  nbre_copies)
+    dense_image_warp_layer = ks.layers.Lambda(lambda x: dense_image_warp(x[0], x[1]))
+    combined_data_w = dense_image_warp_layer((combined_data, flow))
+    # combined_data_w = combined_data
+    c2_w = combined_data_w[..., :-1]
+    prev_disp = combined_data_w[..., -1]
+    # Compute costs (operations performed in float16 for speedup)
+    mult = tf.cast(c1, tf.float16) * tf.cast(c2_w, tf.float16)
+    split = tf.split(mult, num_or_size_splits=nbre_cuts, axis=-1)
+    sub_costs = tf.stack(split, 1)
+    cv = tf.reduce_mean(sub_costs, axis=-1)
+    cv_to_cast = tf.reshape(cv, [-1, (nbre_cuts) * nbre_copies, h, w])
+    cv = tf.cast(tf.transpose(cv_to_cast, perm=[0, 2, 3, 1]), tf.float32)
+    prev_disp = tf.transpose(prev_disp, perm=[0, 2, 3, 1])
+
+    return cv, prev_disp
+
+
+@tf.function
+def lambda_get_disparity_sweeping_cv(inp, search_range, nbre_cuts=1):
     """ Computes the DSCV as presented in the paper """
     c1, c2, disp_prev_t, disp, rot, trans, camera_c,  camera_f \
         = inp[0], inp[1], inp[2], inp[3], inp[4], inp[5], inp[6], inp[7]
@@ -597,8 +739,47 @@ def get_disparity_sweeping_cv_former(c1, c2, disp_prev_t, disp, rot, trans, came
     a,b= get_disparity_sweeping_cv(c1, c2, disp_prev_t, disp, rot, trans, camera, search_range, nbre_cuts)
     return a, b
 
-@tf.function
 def cost_volume(c1, search_range, name="cost_volume", dilation_rate=1,
+                nbre_cuts=1):
+    """Build cost volume for associating a pixel from Image1 with its corresponding pixels in Image2.
+    Args:
+        c1: Feature map 1
+        c2: Feature map 2
+        search_range: Search range (maximum displacement)
+    """
+    c1 = tf.cast(c1, tf.float16)
+    c2 = c1
+    strided_search_range = search_range * dilation_rate
+    padded_lvl = tf.pad(c2, [[0, 0],
+                             [strided_search_range, strided_search_range],
+                             [strided_search_range, strided_search_range],
+                             [0, 0]])
+    _, h, w, _ = c2.get_shape().as_list()
+    max_offset = search_range * 2 + 1
+    c1_nchw = tf.transpose(c1, perm=[0, 3, 1, 2])
+    pl_nchw = tf.transpose(padded_lvl, perm=[0, 3, 1, 2])
+
+    c1_nchw = tf.stack(
+        tf.split(c1_nchw, num_or_size_splits=nbre_cuts, axis=1), axis=4)
+    pl_nchw = tf.stack(
+        tf.split(pl_nchw, num_or_size_splits=nbre_cuts, axis=1), axis=4)
+
+    cost_vol = []
+    for y in range(0, max_offset):
+        for x in range(0, max_offset):
+            slice = tf.slice(pl_nchw,
+                             [0, 0, y * dilation_rate, x * dilation_rate,
+                              0], [-1, -1, h, w, -1])
+            cost = tf.reduce_mean(c1_nchw * slice, axis=1)
+            cost_vol.append(cost)
+    cost_vol = tf.concat(cost_vol, axis=3)
+    cost_vol = tf.nn.leaky_relu(cost_vol, alpha=0.1, name=name)
+
+    return tf.cast(cost_vol, tf.float32)
+
+
+@tf.function
+def lambda_cost_volume(c1, search_range, name="cost_volume", dilation_rate=1,
                 nbre_cuts=1):
     """Build cost volume for associating a pixel from Image1 with its corresponding pixels in Image2.
     Args:
