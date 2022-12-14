@@ -118,8 +118,7 @@ def disp_refiner_as_a_function(regularizer_weight, name, feature_map):
     return prev_outs  # tf.concat(prev_outs, axis=-1)
 
 
-def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004,
-                              old_version=True):
+def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
     """
     Functionnal version of M4Depth
     """
@@ -292,16 +291,16 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004,
         # f_enc_L_t = log_tensor(f_enc_L_t, layer_string + 'f_enc_L_t')
 
         # depth_L_t1 = log_tensor(depth_L_t1, layer_string + ' depth_L_t1')
-        if old_version:
-            prev_d2disp_function = \
-                lambda inp: lambda_prev_d2disp(inp[0], inp[1], inp[2], inp[3], inp[4])
-            prev_d2disp_layer = ks.layers.Lambda(prev_d2disp_function,
-                                                 name=layer_string
-                                                      + "_prev_d2disp")
-            disp_L_t1 = prev_d2disp_layer((depth_L_t1, local_rot, local_trans,
-                                           local_camera_c, local_camera_f))
-        else:
-            disp_L_t1 = prev_d2disp(depth_L_t1, local_rot, local_trans,
+        # if old_version:
+        #     prev_d2disp_function = \
+        #         lambda inp: lambda_prev_d2disp(inp[0], inp[1], inp[2], inp[3], inp[4])
+        #     prev_d2disp_layer = ks.layers.Lambda(prev_d2disp_function,
+        #                                          name=layer_string
+        #                                               + "_prev_d2disp")
+        #     disp_L_t1 = prev_d2disp_layer((depth_L_t1, local_rot, local_trans,
+        #                                    local_camera_c, local_camera_f))
+        # else:
+        disp_L_t1 = prev_d2disp(depth_L_t1, local_rot, local_trans,
                                            local_camera_c, local_camera_f)
 
         # disp_L_t1 = log_tensor(disp_L_t1, layer_string + ' disp_L_t1')
@@ -312,17 +311,17 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004,
         #         inp: get_disparity_sweeping_cv(inp[0], inp[1], inp[2], inp[3],
         #                                        inp[4], inp[5], inp[6], inp[7])
         # TODO: nbre_cut must be a tensor part of the input?
-        if old_version:
-            get_disparity_sweeping_cv_layer = tf.keras.layers.Lambda(
-                lambda_get_disparity_sweeping_cv,
-                arguments={"search_range": 4, "nbre_cuts": nbre_cuts},
-                name=layer_string + "_get_disparity_sweeping_cv")
-            cv, disp_prev_t_reproj = \
-                get_disparity_sweeping_cv_layer((f_enc_L_t, f_enc_L_t1, disp_L_t1,
-                                                 disp_L1_t, local_rot, local_trans,
-                                                 local_camera_c, local_camera_f,))
-        else:
-            cv, disp_prev_t_reproj = get_disparity_sweeping_cv(
+        # if old_version:
+        #     get_disparity_sweeping_cv_layer = tf.keras.layers.Lambda(
+        #         lambda_get_disparity_sweeping_cv,
+        #         arguments={"search_range": 4, "nbre_cuts": nbre_cuts},
+        #         name=layer_string + "_get_disparity_sweeping_cv")
+        #     cv, disp_prev_t_reproj = \
+        #         get_disparity_sweeping_cv_layer((f_enc_L_t, f_enc_L_t1, disp_L_t1,
+        #                                          disp_L1_t, local_rot, local_trans,
+        #                                          local_camera_c, local_camera_f,))
+        # else:
+        cv, disp_prev_t_reproj = get_disparity_sweeping_cv(
                     (f_enc_L_t, f_enc_L_t1, disp_L_t1,
                      disp_L1_t, local_rot, local_trans,
                      local_camera_c, local_camera_f),
@@ -334,14 +333,14 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004,
         #                               disp_L1_t, local_rot, local_trans,
         #                               local_camera_c, local_camera_f,
         #                               4, nbre_cuts)
-        if old_version:
-            autocorr = ks.layers.Lambda(lambda_cost_volume,
-                                        arguments={"search_range": 3,
-                                                   "nbre_cuts": nbre_cuts},
-                                        name=layer_string + "_autocorr_function") \
-                (f_enc_L_t)
-        else:
-            autocorr = cost_volume(f_enc_L_t, search_range=3, nbre_cuts=nbre_cuts)
+        # if old_version:
+        #     autocorr = ks.layers.Lambda(lambda_cost_volume,
+        #                                 arguments={"search_range": 3,
+        #                                            "nbre_cuts": nbre_cuts},
+        #                                 name=layer_string + "_autocorr_function") \
+        #         (f_enc_L_t)
+        # else:
+        autocorr = cost_volume(f_enc_L_t, search_range=3, nbre_cuts=nbre_cuts)
         # autocorr = log_tensor(autocorr, layer_string + 'autocorr')
 
         # autocorr = cost_volume(f_enc_L_t, f_enc_L_t, 3,
@@ -406,16 +405,16 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004,
         disp_curr_l = \
             tf.exp(tf.clip_by_value(disp, -7., 7.)) / 2 ** lvl_mul
 
-        if old_version:
-            disp2depth_function = \
-                lambda x: lambda_disp2depth(x[0], x[1], x[2], x[3], x[4])
-            disp2depth_function_layer = ks.layers.Lambda(disp2depth_function,
-                                                         name=layer_string + "_depth_curr_l_disp2depth_function")
-            depth_curr_l = disp2depth_function_layer(
-                (disp_curr_l, local_rot, local_trans,
-                 local_camera_c, local_camera_f))
-        else:
-            depth_curr_l = disp2depth(disp_curr_l, local_rot, local_trans,
+        # if old_version:
+        #     disp2depth_function = \
+        #         lambda x: lambda_disp2depth(x[0], x[1], x[2], x[3], x[4])
+        #     disp2depth_function_layer = ks.layers.Lambda(disp2depth_function,
+        #                                                  name=layer_string + "_depth_curr_l_disp2depth_function")
+        #     depth_curr_l = disp2depth_function_layer(
+        #         (disp_curr_l, local_rot, local_trans,
+        #          local_camera_c, local_camera_f))
+        # else:
+        depth_curr_l = disp2depth(disp_curr_l, local_rot, local_trans,
                                       local_camera_c, local_camera_f)
 
         # These layers have no effect on value directly
@@ -454,14 +453,13 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004,
 class M4Depth(ks.models.Model):
     """Tensorflow model of M4Depth"""
 
-    def __init__(self, n_levels=6, regularizer_weight=0., old_version=True):
+    def __init__(self, n_levels=6, regularizer_weight=0.):
         super(M4Depth, self).__init__()
         regularizer_weight = 0.
 
         self.full_model, self.all_filter_sizes = M4Depth_functionnal_model(
             n_levels,
-            regularizer_weight=regularizer_weight,
-            old_version=old_version)
+            regularizer_weight=regularizer_weight)
         self.n_levels = n_levels
         self.h = 384
         self.w = 384
@@ -794,10 +792,10 @@ class M4Depth(ks.models.Model):
 
 if __name__ == '__main__':
     level=2
-    old_version=False
-    model = M4Depth(n_levels=level, old_version=old_version)
+
+    model = M4Depth(n_levels=level)
     print(model.full_model.summary())
-    model.save_h5("m4depth_model_L_"+str(level)+"_old_v_"+str(old_version)+".h5")
+    model.save_h5("m4depth_model_L_"+str(level)+".h5")
     # model.full_model.summary()
     # for i in model.full_model.layers:
     #     if "lambda" in i.name or "Lambda" in i.name:
