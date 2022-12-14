@@ -36,7 +36,7 @@ if __name__ == '__main__':
     chosen_dataloader.get_dataset("train", param, batch_size=batch_size)
     data = chosen_dataloader.dataset
 
-    model = M4Depth(n_levels=n_lvl, old_version = False)
+    model = M4Depth(n_levels=n_lvl)
     now = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     tensorboard_cbk = ks.callbacks.TensorBoard(
         log_dir="log_dir/" + now, histogram_freq=chosen_dataloader.length/2, write_graph=False,
@@ -46,12 +46,15 @@ if __name__ == '__main__':
     model_checkpoint_cbk = CustomCheckpointCallback(weights_dir, resume_training=True)
 
     opt = tf.keras.optimizers.Adam(learning_rate=0.0001)
-    model.compile(optimizer=opt, metrics=[RootMeanSquaredLogError()])
+    model.compile(optimizer=opt, metrics=[AbsRelError(),
+                           SqRelError(),
+                           RootMeanSquaredError(),
+                           RootMeanSquaredLogError(),
+                           ThresholdRelError(1), ThresholdRelError(2), ThresholdRelError(3)])
     model.save_h5(weights_dir+"/network_save_h5.h5")
-    model.save(weights_dir+"/network_save_tf")
-    nbre_epochs = (220000 // chosen_dataloader.length)*3
+    nbre_epochs = (220000 // chosen_dataloader.length)
 
-    # model.fit(data, epochs=nbre_epochs, callbacks=[tensorboard_cbk, model_checkpoint_cbk])
+    model.fit(data, epochs=nbre_epochs, callbacks=[tensorboard_cbk, model_checkpoint_cbk])
 
 
     # for idx_data, data in enumerate(data):
