@@ -2,20 +2,17 @@ import tensorflow as tf
 from tensorflow import keras as ks, float32
 
 from metrics import RootMeanSquaredLogError
-from utils.depth_operations_functionnal import get_disparity_sweeping_cv, \
+from utils.depth_operations_functional import get_disparity_sweeping_cv, \
     prev_d2disp, disp2depth, cost_volume, \
     depth2disp, lambda_disp2depth, lambda_prev_d2disp, \
     lambda_get_disparity_sweeping_cv, lambda_cost_volume
 from utils.depth_operations import \
     reproject  # We do not need the functionnal reproject
+import numpy as np
 
-
-class DomainNormalization(ks.layers.Layer):
-    # Normalizes a feature map according to the procedure presented by
-    # Zhang et.al. in "Domain-invariant stereo matching networks".
-    # TODO: as a function
+class RescaleLayer(ks.layers.Layer):
     def __init__(self, regularizer_weight=0.0004, *args, **kwargs):
-        super(DomainNormalization, self).__init__(*args, **kwargs)
+        super(RescaleLayer, self).__init__(*args, **kwargs)
         self.regularizer_weight = regularizer_weight
 
     def build(self, input_shape):
@@ -29,18 +26,12 @@ class DomainNormalization(ks.layers.Layer):
                                     dtype='float32',
                                     initializer=tf.zeros_initializer(),
                                     trainable=True)
-
         # Add regularization loss on the scale factor
         regularizer = tf.keras.regularizers.L2(self.regularizer_weight)
         self.add_loss(regularizer(self.scale))
 
     def call(self, f_map):
-        mean = tf.math.reduce_mean(f_map, axis=[1, 2], keepdims=True,
-                                   name=None)
-        var = tf.math.reduce_variance(f_map, axis=[1, 2], keepdims=True,
-                                      name=None)
-        normed = tf.math.l2_normalize((f_map - mean) / (var + 1e-12), axis=-1)
-        return self.scale * normed + self.bias
+        return self.scale * f_map + self.bias
 
     def get_config(self):
         config = super().get_config()
@@ -49,24 +40,28 @@ class DomainNormalization(ks.layers.Layer):
         })
         return config
 
-
-def domain_normalization_as_a_function(f_map, regularizer_weight):
+def domain_normalization_as_a_function(f_map, regularizer_weight, name):
     # Normalizes a feature map according to the procedure presented by
     # Zhang et.al. in "Domain-invariant stereo matching networks".
     # Also see DomainNormalization in former implem of M4Depth.
     # ks.layers.Layer.add_loss(regularizer(scale))
+    channels = f_map.shape[-1]
 
     mean = tf.math.reduce_mean(f_map, axis=[1, 2], keepdims=True, name=None)
     var = tf.math.reduce_variance(f_map, axis=[1, 2], keepdims=True, name=None)
     normed = tf.math.l2_normalize((f_map - mean) / (var + 1e-12), axis=-1)
-    to_ret = ks.layers.Dense(1,
-                             use_bias=True,
-                             kernel_initializer=tf.ones_initializer(),
-                             bias_initializer=tf.zeros_initializer(),
-                             kernel_regularizer=tf.keras.regularizers.L2(
-                                 regularizer_weight)) \
-        (normed)
-    return to_ret
+    normed = RescaleLayer(regularizer_weight, name=name)(normed)
+
+    # This does not work
+    # scale = tf.Variable(trainable=True,
+    #                     initial_value=tf.ones((1, 1, 1, channels)),
+    #                     dtype=float32)
+    # bias = tf.Variable(trainable=True,
+    #                    initial_value=tf.zeros((1, 1, 1, channels)),
+    #                    dtype=float32)
+    # normed = scale * normed + bias
+    #
+    return normed
 
 
 @tf.function
@@ -178,9 +173,11 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004,
             conv_layers_s1_output)
 
         if idx == 0:
-            x = DomainNormalization(regularizer_weight=regularizer_weight,
-                                    name=layer_string + "_Encoder_DN")(x)
-            # x = domain_normalization_as_a_function(x, regularizer_weight)
+            # x = DomainNormalization(regularizer_weight=regularizer_weight,
+            #                             name=layer_string + "_Encoder_DN")(x)
+            x = domain_normalization_as_a_function(x,
+                                                   regularizer_weight,
+                                                   name=layer_string+"_Encoder_DN")
             # print(x.shape)
         conv_layers_s2_output = ks.layers.Conv2D(
             n_filter, 3, strides=(2, 2), padding='same',
@@ -796,5 +793,15 @@ class M4Depth(ks.models.Model):
 
 
 if __name__ == '__main__':
-    model = M4Depth(n_levels=6, old_version=False)
-    model.save_h5("test.h5")
+    level=2
+    old_version=False
+    model = M4Depth(n_levels=level, old_version=old_version)
+    print(model.full_model.summary())
+    model.save_h5("m4depth_model_L_"+str(level)+"_old_v_"+str(old_version)+".h5")
+    # model.full_model.summary()
+    # for i in model.full_model.layers:
+    #     if "lambda" in i.name or "Lambda" in i.name:
+    #         print("name {}".format(i.name))
+    #         print("in {}".format(i.input))
+    #         print("out {}".format(i.output))
+
