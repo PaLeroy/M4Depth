@@ -60,13 +60,13 @@ else:
     use_cuda_backproject = False
 
 
-def _interpolate_bilinear_functionnal(grid,
-                                      query_points,
-                                      name='interpolate_bilinear',
-                                      indexing='ij'):
+def _interpolate_bilinear_functional(grid,
+                                     query_points,
+                                     name='interpolate_bilinear',
+                                     indexing='ij'):
     """
 
-    MODIFIED to be functionnal w.r.t tensorflow
+    MODIFIED to be functional w.r.t tensorflow
 
     Similar to Matlab's interp2 function.
 
@@ -94,7 +94,7 @@ def _interpolate_bilinear_functionnal(grid,
         query_points = ops.convert_to_tensor(query_points)
         shape = grid.get_shape().as_list()
         if len(shape) != 5:
-            msg = 'Grid must be 5 dimensional in functionnal implementation. Received size: '
+            msg = 'Grid must be 5 dimensional in functional implementation. Received size: '
             raise ValueError(msg + str(grid.get_shape()))
 
         batch_size, nbre_copies, height, width, channels = (
@@ -253,13 +253,13 @@ def dense_image_warp(image, flow, name='dense_image_warp'):
             image = array_ops.reshape(image,
                                       [batch_size, height, width, channels])
             raise ValueError(
-                "Case not handled in the functionnal implementation in dense_image_warp")
+                "Case not handled in the functional implementation in dense_image_warp")
         elif len(shape) == 4:
             batch_size, height, width, channels = shape
             raise ValueError(
-                "Case not handled in the functionnal implementation in dense_image_warp")
+                "Case not handled in the functional implementation in dense_image_warp")
         else:
-            # functionnal
+            # functional
             batch_size, nbre_copies, height, width, channels = shape
         # The flow is defined on the image grid. Turn the flow into a list of query
         # points in the grid space.
@@ -291,8 +291,8 @@ def dense_image_warp(image, flow, name='dense_image_warp'):
                                                         height * width, 2])
             # Compute values at the query points, then reshape the result back to the
             # image grid.
-            interpolated = _interpolate_bilinear_functionnal(image,
-                                                             query_points_flattened)
+            interpolated = _interpolate_bilinear_functional(image,
+                                                            query_points_flattened)
 
         if len(shape) == 3:
             interpolated = array_ops.reshape(interpolated,

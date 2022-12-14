@@ -18,7 +18,7 @@ for details about the operations performed here.
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras as ks
-from utils.dense_image_warp_functionnal import dense_image_warp
+from utils.dense_image_warp_functional import dense_image_warp
 
 
 # def wrap_feature_block(feature_block, opt_flow):
@@ -271,6 +271,7 @@ def disp2depth(disp, rot, trans, camera_c, camera_f):
 
     ones_ = tf.keras.layers.Lambda(lambda x: repeat_ones(x))(camera_f)
     f_vec = ks.layers.Concatenate(axis=1)([camera_f, ones_])
+    # TODO tf.pad
     f_vec =  ks.layers.Reshape((1, 3, 1,),)(f_vec)
 
     rot_coords = rot_mat @ coords2d
@@ -764,12 +765,14 @@ def cost_volume(c1, search_range, name="cost_volume", dilation_rate=1,
     pl_nchw = tf.stack(
         tf.split(pl_nchw, num_or_size_splits=nbre_cuts, axis=1), axis=4)
 
+    # GATHERND
     cost_vol = []
     for y in range(0, max_offset):
         for x in range(0, max_offset):
             slice = tf.slice(pl_nchw,
-                             [0, 0, y * dilation_rate, x * dilation_rate,
-                              0], [-1, -1, h, w, -1])
+                             [0, 0, y * dilation_rate, x * dilation_rate,0],
+                             [-1, -1, h, w, -1])
+
             cost = tf.reduce_mean(c1_nchw * slice, axis=1)
             cost_vol.append(cost)
     cost_vol = tf.concat(cost_vol, axis=3)
