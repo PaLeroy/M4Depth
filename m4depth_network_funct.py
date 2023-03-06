@@ -500,23 +500,18 @@ class M4Depth(ks.models.Model):
 
     @tf.function
     def call(self, data):
+        # data = traj_sample, camera, inputs_recurrent
         self.step_counter.assign_add(1)
         # Traj samples items are [batch_size, seq_len, ....]
         traj_samples = data[0]
         camera = data[1]
+        inputs_recurrent=data[2].copy()
         depths = []
         camera_c_input = camera["c"]
         camera_f_input = camera["f"]
 
         # inputs_recurrent = [f, d, f, d, f, d] starting at the lowest level
         batch_size = traj_samples[0]["rot"].shape[0]
-        inputs_init_seq = self.inputs_init_seq(batch_size)
-        inputs_recurrent = []
-        for i in range(self.n_levels, 0, -1):
-            key = "L_" + str(i) + "_f_enc_L_t1_init"
-            inputs_recurrent.append(inputs_init_seq[key])
-            key = "L_" + str(i) + "_d_est_L_t1_init"
-            inputs_recurrent.append(inputs_init_seq[key])
 
         for idx_sample, sample in enumerate(traj_samples):
             # for each elem of the sequence
@@ -549,8 +544,16 @@ class M4Depth(ks.models.Model):
                 inputs_recurrent[i * 2 + 1] = outputs[self.n_levels + j]
                 list_depth.append({"depth": outputs[self.n_levels + j]})
 
-            depths.append(list_depth)
+            # Depth list is lower level first.
+            # We need lower level last to act like former implementation.
+            # We want (list_depth[0] = pred for the image size)
+            # TODO: possible when we fill list_depth but fastest solution to code
+            depths.append(list_depth[::-1])
 
+        # for idx, i in enumerate(depths):
+        #     for idx2, j in enumerate(i):
+        #         for k, v in j.items():
+        #             print(idx, idx2, k, v.shape)
         return depths
 
     @tf.function
@@ -559,6 +562,7 @@ class M4Depth(ks.models.Model):
             with tf.GradientTape() as tape:
                 # iterate over dataset
                 seq_len = data["depth"].get_shape().as_list()[1]
+                batch_size = data["depth"].get_shape().as_list()[0]
                 traj_samples = [{} for i in range(seq_len)]
                 attribute_list = ["depth", "RGB_im", "new_traj", "rot",
                                   "trans"]
@@ -574,12 +578,19 @@ class M4Depth(ks.models.Model):
                                                    sample["trans"],
                                                    data["camera"]["c"],
                                                    data["camera"]["f"])})
-                preds = self((traj_samples, data["camera"]))
+
+
+                inputs_init_seq = self.inputs_init_seq(batch_size)
+                inputs_recurrent = []
+                for i in range(self.n_levels, 0, -1):
+                    key = "L_" + str(i) + "_f_enc_L_t1_init"
+                    inputs_recurrent.append(inputs_init_seq[key])
+                    key = "L_" + str(i) + "_d_est_L_t1_init"
+                    inputs_recurrent.append(inputs_init_seq[key])
+
+                preds = self((traj_samples, data["camera"], inputs_recurrent))
 
                 loss = self.m4depth_loss(gts, preds)
-            count = tf.math.count_nonzero(tf.math.is_nan(loss))
-            if count != 0:
-                tf.print("nan found loss")
 
             # Compute gradients
             trainable_vars = self.trainable_variables
@@ -587,46 +598,46 @@ class M4Depth(ks.models.Model):
             # Update weights
             self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-            for weights, grads in zip(self.full_model.trainable_weights,
-                                      gradients):
-                count = tf.math.count_nonzero(tf.math.is_nan(grads))
-                if count != 0:
-                    tf.print("nan found gradients",
-                             weights.name.replace(':', '_') + '_grads')
-
-                count = tf.math.count_nonzero(tf.math.is_nan(weights))
-                if count != 0:
-                    tf.print("nan found weights",
-                             weights.name.replace(':', '_') + '_weights')
-
-                tf.summary.histogram(weights.name.replace(':', '_') + '_grads',
-                                     data=grads, step=self.step_counter)
-                abs_grad = tf.abs(grads)
-                tf.summary.scalar(
-                    weights.name.replace(':', '_') + '_grads_mean',
-                    data=tf.reduce_mean(abs_grad), step=self.step_counter)
-                tf.summary.scalar(
-                    weights.name.replace(':', '_') + '_grads_min',
-                    data=tf.reduce_min(abs_grad), step=self.step_counter)
-                tf.summary.scalar(
-                    weights.name.replace(':', '_') + '_grads_max',
-                    data=tf.reduce_max(abs_grad), step=self.step_counter)
-
-                tf.summary.histogram(
-                    weights.name.replace(':', '_') + '_weights', data=weights,
-                    step=self.step_counter)
-                tf.summary.scalar(
-                    weights.name.replace(':', '_') + '_weights_mean',
-                    data=tf.reduce_mean(weights),
-                    step=self.step_counter)
-                tf.summary.scalar(
-                    weights.name.replace(':', '_') + '_weights_min',
-                    data=tf.reduce_min(weights),
-                    step=self.step_counter)
-                tf.summary.scalar(
-                    weights.name.replace(':', '_') + '_weights_max',
-                    data=tf.reduce_max(weights),
-                    step=self.step_counter)
+            # for weights, grads in zip(self.full_model.trainable_weights,
+            #                           gradients):
+            #     count = tf.math.count_nonzero(tf.math.is_nan(grads))
+            #     if count != 0:
+            #         tf.print("nan found gradients",
+            #                  weights.name.replace(':', '_') + '_grads')
+            #
+            #     count = tf.math.count_nonzero(tf.math.is_nan(weights))
+            #     if count != 0:
+            #         tf.print("nan found weights",
+            #                  weights.name.replace(':', '_') + '_weights')
+            #
+            #     tf.summary.histogram(weights.name.replace(':', '_') + '_grads',
+            #                          data=grads, step=self.step_counter)
+            #     abs_grad = tf.abs(grads)
+            #     tf.summary.scalar(
+            #         weights.name.replace(':', '_') + '_grads_mean',
+            #         data=tf.reduce_mean(abs_grad), step=self.step_counter)
+            #     tf.summary.scalar(
+            #         weights.name.replace(':', '_') + '_grads_min',
+            #         data=tf.reduce_min(abs_grad), step=self.step_counter)
+            #     tf.summary.scalar(
+            #         weights.name.replace(':', '_') + '_grads_max',
+            #         data=tf.reduce_max(abs_grad), step=self.step_counter)
+            #
+            #     tf.summary.histogram(
+            #         weights.name.replace(':', '_') + '_weights', data=weights,
+            #         step=self.step_counter)
+            #     tf.summary.scalar(
+            #         weights.name.replace(':', '_') + '_weights_mean',
+            #         data=tf.reduce_mean(weights),
+            #         step=self.step_counter)
+            #     tf.summary.scalar(
+            #         weights.name.replace(':', '_') + '_weights_min',
+            #         data=tf.reduce_min(weights),
+            #         step=self.step_counter)
+            #     tf.summary.scalar(
+            #         weights.name.replace(':', '_') + '_weights_max',
+            #         data=tf.reduce_max(weights),
+            #         step=self.step_counter)
 
             # Update metrics (includes the metric that tracks the loss)
 
@@ -667,9 +678,6 @@ class M4Depth(ks.models.Model):
             self.compiled_metrics.update_state(gt, est)
             out_dict = {m.name: m.result() for m in self.metrics}
             out_dict["loss"] = loss
-
-            for k, v in out_dict.items():
-                tf.summary.scalar(k, data=v, step=self.step_counter)
 
         # Return a dict mapping metric names to current value.
         # Note that it will include the loss (tracked in self.metrics).
@@ -750,9 +758,6 @@ class M4Depth(ks.models.Model):
                 nbre_points = 0.
 
                 gt_preprocessed = preprocess(gt["depth"])
-                count = tf.math.count_nonzero(tf.math.is_nan(gt_preprocessed))
-                if count != 0:
-                    tf.print("error gt_preprocessed", count)
 
                 def masked_reduce_mean(array, mask, axis=None):
                     return tf.reduce_sum(array * mask, axis=axis) / (
@@ -761,11 +766,6 @@ class M4Depth(ks.models.Model):
                 for i, pred in enumerate(
                         pred_pyr):  # Iterate over the outputs produced by the different levels
 
-                    count = tf.math.count_nonzero(
-                        tf.math.is_nan(pred["depth"]))
-                    if count != 0:
-                        tf.print("error before preprocess pred[depth]", i,
-                                 count)
 
                     pred_depth = preprocess(pred["depth"])
 

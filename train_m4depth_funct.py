@@ -22,7 +22,7 @@ if __name__ == '__main__':
 
     param = DataloaderParameters({
     '_comment': '/Users/pascalleroy/Documents/m4depth/M4Depth/relative paths should be written relative to this file',
-    'midair': '/mnt/ssd2/midair/MidAir',
+    'midair': '/home/pascal/m4depth/MidAir',
     'kitti-raw': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/Kitti',
     'tartanair': '/Users/pascalleroy/Documents/m4depth/M4Depth/datasets/TartanAir'},
     'data/midair/train_data',
@@ -31,28 +31,26 @@ if __name__ == '__main__':
         True)
 
     batch_size = 3
-    n_lvl = 2
+    n_lvl = 6
     chosen_dataloader = MidAir()
     chosen_dataloader.get_dataset("train", param, batch_size=batch_size)
     data = chosen_dataloader.dataset
 
-    print("-------------")
-    print()
-    print()
     model = M4Depth(n_levels=n_lvl)
+    print("model called")
     now = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     tensorboard_cbk = ks.callbacks.TensorBoard(
-        log_dir="log_dir/" + now, histogram_freq=0, write_graph=False,
-        write_images=False, update_freq="batch",
-        profile_batch=0, embeddings_freq=0, embeddings_metadata=None)
+        log_dir="log_dir/" + now, histogram_freq=chosen_dataloader.length/2, write_graph=False,
+        write_images=False, update_freq=chosen_dataloader.length/2)
 
     weights_dir = os.path.join("pretrained_weights/midair/", "train", now)
     model_checkpoint_cbk = CustomCheckpointCallback(weights_dir, resume_training=True)
 
     opt = tf.keras.optimizers.Adam(learning_rate=0.0001)
     model.compile(optimizer=opt, metrics=[RootMeanSquaredLogError()])
+    print("model compiled")
+    model.save_h5(weights_dir+"/network_save_h5.h5")
     nbre_epochs = (220000 // chosen_dataloader.length)
-
     model.fit(data, epochs=nbre_epochs, callbacks=[tensorboard_cbk, model_checkpoint_cbk])
 
 
