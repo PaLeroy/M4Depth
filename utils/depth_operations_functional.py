@@ -740,6 +740,46 @@ def get_disparity_sweeping_cv_former(c1, c2, disp_prev_t, disp, rot, trans, came
     a,b= get_disparity_sweeping_cv(c1, c2, disp_prev_t, disp, rot, trans, camera, search_range, nbre_cuts)
     return a, b
 
+# def cost_volume(c1, search_range, name="cost_volume", dilation_rate=1,
+#                 nbre_cuts=1):
+#     """Build cost volume for associating a pixel from Image1 with its corresponding pixels in Image2.
+#     Args:
+#         c1: Feature map 1
+#         c2: Feature map 2
+#         search_range: Search range (maximum displacement)
+#     """
+#     c1 = tf.cast(c1, tf.float16)
+#     c2 = c1
+#     strided_search_range = search_range * dilation_rate
+#     padded_lvl = tf.pad(c2, [[0, 0],
+#                              [strided_search_range, strided_search_range],
+#                              [strided_search_range, strided_search_range],
+#                              [0, 0]])
+#     _, h, w, _ = c2.get_shape().as_list()
+#     max_offset = search_range * 2 + 1
+#     c1_nchw = tf.transpose(c1, perm=[0, 3, 1, 2])
+#     pl_nchw = tf.transpose(padded_lvl, perm=[0, 3, 1, 2])
+#
+#     c1_nchw = tf.stack(
+#         tf.split(c1_nchw, num_or_size_splits=nbre_cuts, axis=1), axis=4)
+#     pl_nchw = tf.stack(
+#         tf.split(pl_nchw, num_or_size_splits=nbre_cuts, axis=1), axis=4)
+#
+#     # GATHERND
+#     cost_vol = []
+#     for y in range(0, max_offset):
+#         for x in range(0, max_offset):
+#             slice = tf.slice(pl_nchw,
+#                              [0, 0, y * dilation_rate, x * dilation_rate,0],
+#                              [-1, -1, h, w, -1])
+#
+#             cost = tf.reduce_mean(c1_nchw * slice, axis=1)
+#             cost_vol.append(cost)
+#     cost_vol = tf.concat(cost_vol, axis=3)
+#     cost_vol = tf.nn.leaky_relu(cost_vol, alpha=0.1, name=name)
+#
+#     return tf.cast(cost_vol, tf.float32)
+
 def cost_volume(c1, search_range, name="cost_volume", dilation_rate=1,
                 nbre_cuts=1):
     """Build cost volume for associating a pixel from Image1 with its corresponding pixels in Image2.
@@ -748,38 +788,40 @@ def cost_volume(c1, search_range, name="cost_volume", dilation_rate=1,
         c2: Feature map 2
         search_range: Search range (maximum displacement)
     """
+    print("in", c1.shape)
+    max_offset=search_range*2+1
     c1 = tf.cast(c1, tf.float16)
-    c2 = c1
+
     strided_search_range = search_range * dilation_rate
-    padded_lvl = tf.pad(c2, [[0, 0],
+    padded_lvl = tf.pad(c1, [[0, 0],
                              [strided_search_range, strided_search_range],
                              [strided_search_range, strided_search_range],
                              [0, 0]])
-    _, h, w, _ = c2.get_shape().as_list()
-    max_offset = search_range * 2 + 1
-    c1_nchw = tf.transpose(c1, perm=[0, 3, 1, 2])
-    pl_nchw = tf.transpose(padded_lvl, perm=[0, 3, 1, 2])
+    _, h, w, _ = c1.get_shape().as_list()
+    c1_nchw = c1 #tf.transpose(c1, perm=[0, 3, 1, 2])
+    pl_nchw = padded_lvl #tf.transpose(padded_lvl, perm=[0, 3, 1, 2])
 
-    c1_nchw = tf.stack(
-        tf.split(c1_nchw, num_or_size_splits=nbre_cuts, axis=1), axis=4)
-    pl_nchw = tf.stack(
-        tf.split(pl_nchw, num_or_size_splits=nbre_cuts, axis=1), axis=4)
+    list_all2=tf.image.extract_patches(pl_nchw,
+                                       sizes=[1, h, w, 1],
+                                       strides=[1, dilation_rate, dilation_rate,1],
+                                       rates=[1,1,1,1],
+                                       padding="VALID")
+    # list_all2=tf.reshape(list_all2, list_all2.shape[0:3]+c1.shape[1:4])
+    list_all2=ks.layers.Reshape(list_all2.shape[1:3]+c1.shape[1:4], dtype=tf.float16)(list_all2)
 
-    # GATHERND
-    cost_vol = []
-    for y in range(0, max_offset):
-        for x in range(0, max_offset):
-            slice = tf.slice(pl_nchw,
-                             [0, 0, y * dilation_rate, x * dilation_rate,0],
-                             [-1, -1, h, w, -1])
+    c1_repeat = tf.expand_dims(c1,axis=1)
+    c1_repeat = tf.expand_dims(c1_repeat,axis=1)
+    c1_repeat = tf.tile(c1_repeat, [1,list_all2.shape[1], list_all2.shape[2],1, 1, 1])
+    list_all2 = c1_repeat*list_all2
 
-            cost = tf.reduce_mean(c1_nchw * slice, axis=1)
-            cost_vol.append(cost)
-    cost_vol = tf.concat(cost_vol, axis=3)
+    split_stack = tf.stack(tf.split(list_all2, num_or_size_splits=nbre_cuts, axis=-1), axis=-1)
+    cost = tf.reduce_mean(split_stack, axis=-2)
+    cost = tf.transpose(cost, perm=[0, 3, 4, 1, 2, 5])
+    # cost_vol = tf.reshape(cost, cost.shape[0:1] + cost.shape[1:3] + [cost.shape[3]*cost.shape[4]*cost.shape[5]])
+    cost_vol = ks.layers.Reshape(cost.shape[1:3] + [cost.shape[3]*cost.shape[4]*cost.shape[5]], dtype=tf.float16)(cost)
     cost_vol = tf.nn.leaky_relu(cost_vol, alpha=0.1, name=name)
 
     return tf.cast(cost_vol, tf.float32)
-
 
 @tf.function
 def lambda_cost_volume(c1, search_range, name="cost_volume", dilation_rate=1,
