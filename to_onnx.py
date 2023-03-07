@@ -8,7 +8,7 @@ from m4depth_network_funct import RescaleLayer, log_tensor_companion, \
     get_disparity_sweeping_cv, cost_volume,prev_d2disp,disp2depth
 
 custom_objects = {"RescaleLayer": RescaleLayer,}
-model_path = 'm4depth_model_L_2_old_v_False.h5'
+model_path = 'm4depth_model_L_2.h5'
 with keras.utils.custom_object_scope(custom_objects):
     keras_model = keras.models.load_model(model_path)
 
