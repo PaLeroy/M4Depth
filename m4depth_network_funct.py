@@ -11,9 +11,8 @@ from utils.depth_operations import \
 import numpy as np
 
 class RescaleLayer(ks.layers.Layer):
-    def __init__(self, regularizer_weight=0.0004, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super(RescaleLayer, self).__init__(*args, **kwargs)
-        self.regularizer_weight = regularizer_weight
 
     def build(self, input_shape):
         channels = input_shape[-1]
@@ -26,31 +25,24 @@ class RescaleLayer(ks.layers.Layer):
                                     dtype='float32',
                                     initializer=tf.zeros_initializer(),
                                     trainable=True)
-        # Add regularization loss on the scale factor
-        regularizer = tf.keras.regularizers.L2(self.regularizer_weight)
-        self.add_loss(regularizer(self.scale))
 
     def call(self, f_map):
         return self.scale * f_map + self.bias
 
     def get_config(self):
         config = super().get_config()
-        config.update({
-            "regularizer_weight": self.regularizer_weight,
-        })
         return config
 
-def domain_normalization_as_a_function(f_map, regularizer_weight, name):
+def domain_normalization_as_a_function(f_map, name):
     # Normalizes a feature map according to the procedure presented by
     # Zhang et.al. in "Domain-invariant stereo matching networks".
     # Also see DomainNormalization in former implem of M4Depth.
-    # ks.layers.Layer.add_loss(regularizer(scale))
-    channels = f_map.shape[-1]
 
+    channels = f_map.shape[-1]
     mean = tf.math.reduce_mean(f_map, axis=[1, 2], keepdims=True, name=None)
     var = tf.math.reduce_variance(f_map, axis=[1, 2], keepdims=True, name=None)
     normed = tf.math.l2_normalize((f_map - mean) / (var + 1e-12), axis=-1)
-    normed = RescaleLayer(regularizer_weight, name=name)(normed)
+    normed = RescaleLayer(name=name)(normed)
 
     # This does not work
     # scale = tf.Variable(trainable=True,
@@ -76,20 +68,19 @@ def log_tensor(x, name=""):
     return ks.layers.Lambda(log_tensor_companion)((x, name))[0]
 
 
-def disp_refiner_as_a_function(regularizer_weight, name, feature_map):
+def disp_refiner_as_a_function(name, feature_map):
     init = ks.initializers.HeNormal()
-    reg = ks.regularizers.L1(l1=regularizer_weight)
     conv_channels = [128, 128, 96]
     prep_conv_layers = [ks.layers.Conv2D(
         nbre_filters, 3, strides=(1, 1), padding='same',
-        kernel_initializer=init, kernel_regularizer=reg,
+        kernel_initializer=init,
         name=name + "_prep_conv_layers_" + str(i))
         for i, nbre_filters in enumerate(conv_channels)
     ]
     conv_channels = [64, 32, 16, 5]
     est_d_conv_layers = [ks.layers.Conv2D(
         nbre_filters, 3, strides=(1, 1), padding='same',
-        kernel_initializer=init, kernel_regularizer=reg,
+        kernel_initializer=init,
         name=name + "_est_d_conv_layers" + str(i))
         for i, nbre_filters in enumerate(conv_channels)
     ]
@@ -118,7 +109,7 @@ def disp_refiner_as_a_function(regularizer_weight, name, feature_map):
     return prev_outs  # tf.concat(prev_outs, axis=-1)
 
 
-def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
+def M4Depth_functionnal_model(nbre_levels=6):
     """
     Functionnal version of M4Depth
     """
@@ -155,7 +146,6 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
     encoder_output_list_per_level = []
 
     init = ks.initializers.HeNormal()
-    reg = ks.regularizers.L1(l1=regularizer_weight)
 
     all_filter_sizes = [16, 32, 64, 96, 128, 192]
     filter_sizes = [all_filter_sizes[i] for i in range(nbre_levels)]
@@ -165,22 +155,19 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
         layer_string = "L_" + str(idx + 1)
         conv_layers_s1_output = ks.layers.Conv2D(
             n_filter, 3, strides=(1, 1), padding='same',
-            kernel_initializer=init, kernel_regularizer=reg,
+            kernel_initializer=init,
             name=layer_string + "_Encoder_s1")(x)
         x = ks.layers.LeakyReLU(0.1,
                                 name=layer_string + "_Encoder_s1_LeakyReLU")(
             conv_layers_s1_output)
 
         if idx == 0:
-            # x = DomainNormalization(regularizer_weight=regularizer_weight,
-            #                             name=layer_string + "_Encoder_DN")(x)
-            x = domain_normalization_as_a_function(x,
-                                                   regularizer_weight,
-                                                   name=layer_string+"_Encoder_DN")
+            # x = DomainNormalization(name=layer_string + "_Encoder_DN")(x)
+            x = domain_normalization_as_a_function(x,name=layer_string+"_Encoder_DN")
             # print(x.shape)
         conv_layers_s2_output = ks.layers.Conv2D(
             n_filter, 3, strides=(2, 2), padding='same',
-            kernel_initializer=init, kernel_regularizer=reg,
+            kernel_initializer=init,
             name=layer_string + "_Encoder_s2")(x)
         x = ks.layers.LeakyReLU(0.1, name=layer_string + "_f_enc_L_t")(
             conv_layers_s2_output)
@@ -387,7 +374,6 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
 
         # f_input = log_tensor(f_input,layer_string +  'f_input')
         prev_out = disp_refiner_as_a_function(
-            regularizer_weight=regularizer_weight,
             name=layer_string + "_disp_refiner", feature_map=f_input)
 
         # slicing_disp_function = lambda x: x[0][:, :, :, :1]
@@ -453,13 +439,12 @@ def M4Depth_functionnal_model(nbre_levels=6, regularizer_weight=0.0004):
 class M4Depth(ks.models.Model):
     """Tensorflow model of M4Depth"""
 
-    def __init__(self, n_levels=6, regularizer_weight=0.):
+    def __init__(self, n_levels=6):
         super(M4Depth, self).__init__()
-        regularizer_weight = 0.
+
 
         self.full_model, self.all_filter_sizes = M4Depth_functionnal_model(
-            n_levels,
-            regularizer_weight=regularizer_weight)
+            n_levels)
         self.n_levels = n_levels
         self.h = 384
         self.w = 384
