@@ -811,7 +811,6 @@ def cost_volume(c1, search_range, name="cost_volume", dilation_rate=1,
 
     c1_repeat = tf.expand_dims(c1,axis=1)
     c1_repeat = tf.expand_dims(c1_repeat,axis=1)
-    c1_repeat = tf.tile(c1_repeat, [1,list_all2.shape[1], list_all2.shape[2],1, 1, 1])
     list_all2 = c1_repeat*list_all2
 
     split_stack = tf.stack(tf.split(list_all2, num_or_size_splits=nbre_cuts, axis=-1), axis=-1)
@@ -866,7 +865,6 @@ def cost_volume(c1, search_range, name="cost_volume", dilation_rate=1,
 #
 #     c1_repeat = tf.expand_dims(c1,axis=1)
 #     c1_repeat = tf.expand_dims(c1_repeat,axis=1)
-#     c1_repeat = tf.tile(c1_repeat, [1,patches.shape[1], patches.shape[2],1, 1, 1])
 #     patches = c1_repeat*patches
 #     split_stack = tf.stack(tf.split(patches, num_or_size_splits=nbre_cuts, axis=-1), axis=-1)
 #     cost = tf.reduce_mean(split_stack, axis=-2)
